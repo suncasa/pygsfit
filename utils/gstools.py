@@ -142,10 +142,10 @@ class GSCostFunctions:
         """
         if platform.system() == 'Linux' or platform.system() == 'Darwin':
             libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   'binaries/MWTransferArr.so')
+                                   '../binaries/MWTransferArr.so')
         if platform.system() == 'Windows': ##TODO: not yet tested on Windows platform
             libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   'binaries/MWTransferArr64.dll')
+                                   '../binaries/MWTransferArr64.dll')
         GET_MW = initGET_MW(libname)  # load the library
 
         asec2cm = 0.725e8
