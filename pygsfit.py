@@ -657,7 +657,7 @@ class App(QMainWindow):
         # Group 2: Fit Method
         self.fit_method_box = QHBoxLayout()
         self.fit_method_selector_widget = QComboBox()
-        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution"])
+        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution","mcmc"])
         self.fit_method_selector_widget.currentIndexChanged.connect(self.fit_method_selector)
         self.fit_method_box.addWidget(QLabel("Fit Method"))
         self.fit_method_box.addWidget(self.fit_method_selector_widget)
@@ -1877,6 +1877,8 @@ class App(QMainWindow):
         if self.fit_method == 'basinhopping':
             self.fit_kws = {'niter': 50, 'T': 90., 'stepsize': 0.8,
                             'interval': 25}
+        if self.fit_method == 'mcmc':
+            self.fit_kws ={'steps':1000, 'burn':300, 'thin':10}  
 
     def update_fit_kws_widgets(self):
         # first delete every widget for the fit keywords
@@ -2065,8 +2067,9 @@ class App(QMainWindow):
         if self.fit_method == 'basinhopping':
             fit_kws['minimizer_kwargs'] = {'method': 'Nelder-Mead'}
             max_nfev *= self.fit_kws['niter'] * (self.fit_params_nvarys + 1)
-        if self.fit_method == 'nelder':
+        if self.fit_method == 'nelder' or self.fit_method=='mcmc':
             fit_kws = {'options': self.fit_kws}
+        
         print(fit_kws)
 
         if hasattr(self, 'spec_fitplot'):
@@ -2074,25 +2077,73 @@ class App(QMainWindow):
         if self.fit_function != gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
             print ("Not yet implemented")
         else:
-            mini = lmfit.Minimizer(self.fit_function, self.fit_params,
+            if self.fit_method!='mcmc':
+                mini = lmfit.Minimizer(self.fit_function, self.fit_params,
                                    fcn_args=(freqghz_tofit,),
                                    fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
                                    max_nfev=max_nfev, nan_policy='omit')
-            method = self.fit_method
-            mi = mini.minimize(method=method, **fit_kws)
-            print(method + ' minimization results')
-            print(lmfit.fit_report(mi, show_correl=True))
-            self.fit_params_res = mi.params
-            print('==========Fit Parameters Updated=======')
-            for n, key in enumerate(self.fit_params_res):
-                self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+                method = self.fit_method
+                mi = mini.minimize(method=method, **fit_kws)
+                print(method + ' minimization results')
+                print(lmfit.fit_report(mi, show_correl=True))
+                self.fit_params_res = mi.params
+                print('==========Fit Parameters Updated=======')
+                for n, key in enumerate(self.fit_params_res):
+                    self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
 
-            freqghz_toplot = np.logspace(0, np.log10(20.), 100)
-            spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
-            self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
-                                                     pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
-                                                     symbol=None, symbolBrush=None)
-            self.speccanvas.addItem(self.spec_fitplot)
+                freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+                spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
+                self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                         symbol=None, symbolBrush=None)
+                self.speccanvas.addItem(self.spec_fitplot)
+            else:
+                fit_kws_nelder = {'maxiter': 2000, 'tol': 0.01}
+                mini = lmfit.Minimizer(self.fit_function, self.fit_params,
+                                   fcn_args=(freqghz_tofit,),
+                                   fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
+                                   max_nfev=max_nfev, nan_policy='omit')
+                method = 'Nelder'
+                mi = mini.minimize(method=method, **fit_kws_nelder)
+                fit_params_res = mi.params
+                fit_params_res.add('__lnsigma', value=np.log(0.1), min=np.log(0.001), max=np.log(2))
+                
+                burn=self.fit_kws['burn']
+                thin=self.fit_kws['thin']
+                steps=self.fit_kws['steps']
+               
+                emcee_kws = dict(steps=steps, burn=burn,\
+                                 thin=thin, is_weighted=False,\
+                            progress=True)
+                mini = lmfit.Minimizer(self.fit_function, fit_params_res,
+                                   fcn_args=(freqghz_tofit,),
+                                   fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
+                                   max_nfev=max_nfev, nan_policy='omit')
+                emcee_params = mini.minimize(method='emcee', **emcee_kws)
+                print(lmfit.report_fit(emcee_params.params))
+                chain=emcee_params.flatchain
+                shape=chain.shape[0]
+                
+                for n, key in enumerate(self.fit_params_res):
+                    try:
+                        self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
+                    except KeyError:
+                        pass
+                freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+                
+                for i in range(burn,shape,thin):
+                    for n,key in enumerate(self.fit_params_res):
+                        try:
+                            mi.params[key].value=chain[key][i]
+                        except KeyError:
+                            pass
+                    spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
+                    self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                         symbol=None, symbolBrush=None)
+                    self.spec_fitplot.setAlpha(0.01,False)
+                    self.speccanvas.addItem(self.spec_fitplot)
+                mi.params=emcee_params.params
             ## Surajit
             if self.savedata==True:
                 
