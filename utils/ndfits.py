@@ -1,12 +1,16 @@
+import copy
 import os
 import numpy as np
 from astropy.io import fits
 from sunpy import map as smap
 import warnings
+import sys
+
 warnings.simplefilter("ignore")
 
 stokesval = {'1': 'I', '2': 'Q', '3': 'U', '4': 'V', '-1': 'RR', '-2': 'LL', '-3': 'RL', '-4': 'LR', '-5': 'XX',
              '-6': 'YY', '-7': 'XY', '-8': 'YX'}
+
 
 
 def headerfix(header, PC_coor=True):
@@ -35,6 +39,26 @@ def headerfix(header, PC_coor=True):
     return header
 
 
+def headerparse(header):
+    '''
+        get axis index of polarization
+    '''
+
+    ndim = header['NAXIS']
+    stokesinfo = {'axis': None, 'headernew': {}}
+    keys2analy = ['NAXIS', 'CTYPE', 'CRVAL', 'CDELT', 'CRPIX', 'CUNIT']
+    for dim in range(1, ndim + 1):
+        k = 'CTYPE{}'.format(dim)
+        if header[k].startswith('STOKES'):
+            stokesinfo['axis'] = dim
+    if stokesinfo['axis'] is not None:
+        dim = stokesinfo['axis']
+        for k in keys2analy:
+            k_ = '{}{}'.format(k, dim)
+            stokesinfo['headernew']['{}{}'.format(k, 4)] = header[k_]
+    return stokesinfo
+
+
 def headersqueeze(header, data):
     '''
         Only 1D, 2D, or 3D images are currently supported by
@@ -44,10 +68,12 @@ def headersqueeze(header, data):
     '''
     dshape = data.shape
     ndim = data.ndim
+    ## nsdim: numbers of single-dimensional entries
+    nsdim = np.count_nonzero(np.array(dshape) == 1)
     ## nonsdim: non-single-dimensional entries
-    nonsdim = ndim - np.count_nonzero(np.array(dshape) == 1)
-    if nonsdim > 3:
-        return None, None
+    nonsdim = ndim - nsdim
+    if nsdim == 0:
+        return header, data
     else:
         keys2chng = ['NAXIS', 'CTYPE', 'CRVAL', 'CDELT', 'CRPIX', 'CUNIT']  # ,'PC01_', 'PC02_', 'PC03_', 'PC04_']
         idx_nonsdim = 0
@@ -63,7 +89,7 @@ def headersqueeze(header, data):
                     k_new = '{}{}'.format(k, idx_nonsdim)
                     header[k_new] = v
                 else:
-                    if k is 'CTYPE' and v.startswith('STOKES'):
+                    if k == 'CTYPE' and v.startswith('STOKES'):
                         header['STOKES'] = header['CRVAL{}'.format(idx + 1)]
 
         idx_nonsdim1 = 0
@@ -76,11 +102,12 @@ def headersqueeze(header, data):
                 if dim2 > 1:
                     idx_nonsdim2 = idx_nonsdim2 + 1
                 k_ = 'PC{:02d}_{:d}'.format(idx1 + 1, idx2 + 1)
-                v = header[k_]
-                header.remove(k_)
-                if dim1 > 1 and dim2 > 1:
-                    k_new = 'PC{:02d}_{:d}'.format(idx_nonsdim1, idx_nonsdim2)
-                    header[k_new] = v
+                if k_ in header.keys():
+                    v = header[k_]
+                    header.remove(k_)
+                    if dim1 > 1 and dim2 > 1:
+                        k_new = 'PC{:02d}_{:d}'.format(idx_nonsdim1, idx_nonsdim2)
+                        header[k_new] = v
 
         header['NAXIS'] = nonsdim
         data = np.squeeze(data)
@@ -113,7 +140,7 @@ def get_bdinfo(freq, bw):
     return fbounds
 
 
-def read(filepath, hdus=None, memmap=None, verbose=False, **kwargs):
+def read(filepath, hdus=None, verbose=False, **kwargs):
     """
     Read a fits file.
 
@@ -139,7 +166,9 @@ def read(filepath, hdus=None, memmap=None, verbose=False, **kwargs):
     Also all comments in the original file are concatenated into a single
     "comment" key in the returned FileHeader.
     """
-    with fits.open(filepath, ignore_blank=True, memmap=memmap) as hdulist:
+    import collections
+
+    with fits.open(filepath, ignore_blank=True) as hdulist:
         if hdus is not None:
             if isinstance(hdus, int):
                 hdulist = hdulist[hdus]
@@ -188,7 +217,7 @@ def read(filepath, hdus=None, memmap=None, verbose=False, **kwargs):
                 if _ is not None:
                     slc[_] = slice(0, 1)
                 hdu.data[np.isnan(hdu.data)] = 0.0
-                rmap = smap.Map(np.squeeze(hdu.data[slc]), hdu.header)
+                rmap = smap.Map(np.squeeze(hdu.data[tuple(slc)]), hdu.header)
                 data = hdu.data.copy()
                 meta['header'] = hdu.header.copy()
                 meta['refmap'] = rmap  # this is a sunpy map of the first slice
@@ -272,13 +301,74 @@ def write(fname, data, header, mask=None, fix_invalid=True, filled_value=0.0, **
         return 1
 
 
-def wrap(fitsfiles, outfitsfile='output.fits', docompress=False, mask=None, fix_invalid=True, filled_value=0.0,
+def header_to_xml(header):
+    import xml.etree.ElementTree as ET
+    # create the file structure
+    tree = ET.ElementTree()
+    root = ET.Element('meta')
+    elem = ET.Element('fits')
+    for k, v in header.items():
+        child = ET.Element(k)
+        if isinstance(v, bool):
+            v = int(v)
+        child.text = str(v)
+        elem.append(child)
+    root.append(elem)
+    tree._setroot(root)
+    return tree
+    # from lxml import etree
+    # tree = etree.Element("meta")
+    # elem = etree.SubElement(tree,"fits")
+    # for k,v in header.items():
+    #     child = etree.SubElement(elem, k)
+    #     if isinstance(v,bool):
+    #         v = int(v)
+    #     child.text = str(v)
+    # return tree
+
+
+def write_j2000_image(fname, data, header):
+    import glymur
+    jp2 = glymur.Jp2k(fname + '.tmp.jp2',
+                      ((data - np.min(data)) * 256 / (np.max(data) - np.min(data))).astype(np.uint8), cratios=[20, 10])
+    boxes = jp2.box
+    header['wavelnth'] = header['crval3']
+    header['waveunit'] = header['cunit3']
+    xmlobj = header_to_xml(header)
+    xmlfile = 'image.xml'
+    if os.path.exists(xmlfile):
+        os.system('rm -rf {}'.format(xmlfile))
+    xmlobj.write(xmlfile)
+    xmlbox = glymur.jp2box.XMLBox(filename='image.xml')
+    boxes.insert(3, xmlbox)
+    jp2_xml = jp2.wrap(fname, boxes=boxes)
+    os.system('rm -rf ' + fname + '.tmp.jp2')
+    os.system('rm -rf {}'.format(xmlfile))
+    return True
+
+
+def wrap(fitsfiles, outfitsfile=None, docompress=False, mask=None, fix_invalid=True, filled_value=0.0, observatory=None,
+         imres=None, verbose=False,
          **kwargs):
-    if len(fitsfiles)<=1:
+    '''
+    wrap single frequency fits files into a multiple frequencies fits file
+    '''
+    from astropy.time import Time
+    if len(fitsfiles) <= 1:
         print('There is only one files in the fits file list. wrap is aborted!')
-        return 0
+        return ''
     else:
-        fitsfiles = sorted(fitsfiles)
+        try:
+            num_files=len(fitsfiles)
+            freqs=np.zeros(num_files)
+            for i in range(num_files):
+                head=fits.getheader(fitsfiles[i])
+                freqs[i]=head['CRVAL3']
+                del head
+            pos=np.argsort(freqs)
+            fitsfiles=fitsfiles[pos]
+        except:
+            fitsfiles = sorted(fitsfiles)
         nband = len(fitsfiles)
         fits_exist = []
         idx_fits_exist = []
@@ -287,59 +377,143 @@ def wrap(fitsfiles, outfitsfile='output.fits', docompress=False, mask=None, fix_
                 fits_exist.append(fitsf)
                 idx_fits_exist.append(sidx)
         if len(fits_exist) == 0: raise ValueError('None of the input fitsfiles exists!')
+        if outfitsfile is None:
+            hdu = fits.open(fits_exist[0])
+            if observatory is None:
+                try:
+                    observatory = hdu[-1].header['TELESCOP']
+                except:
+                    observatory = 'RADIO'
+                    print('Failed to acquire telescope information. set as RADIO')
+            outfitsfile = Time(hdu[-1].header['DATE-OBS']).strftime('{}.%Y%m%dT%H%M%S.%f.allbd.fits'.format(observatory))
+            hdu.close()
         os.system('cp {} {}'.format(fits_exist[0], outfitsfile))
         hdu0 = fits.open(outfitsfile, mode='update')
-        header = hdu0[0].header
-        npol, nbd, ny, nx = int(header['NAXIS4']), nband, int(header['NAXIS2']), int(header['NAXIS1'])
-        data = np.zeros((npol, nbd, ny, nx))
-        cdelts = []
-        cfreqs = []
-        for sidx, fitsf in enumerate(fits_exist):
-            hdu = fits.open(fitsf)
-            cdelts.append(hdu[0].header['CDELT3'])
-            cfreqs.append(hdu[0].header['CRVAL3'])
+        header = hdu0[-1].header
+
+        if header['NAXIS'] != 4:
+            if verbose:
+                print('s1')
+            if imres is None:
+                cdelts = [325.e8] * nband
+                print(
+                    'Failed to read bandwidth information. Set as 325 MHz assuming this is EOVSA data. Use the value of keyword CDELT3 with caution.')
+            else:
+                cdelts = np.squeeze(np.diff(np.array(imres['freq']), axis=1)) * 1e9
+            stokesinfo = headerparse(header)
+            if stokesinfo['axis'] is None:
+                npol = 1
+            else:
+                npol = int(header['NAXIS{}'.format(stokesinfo['axis'])])
+            nbd = nband
+            ny = int(header['NAXIS2'])
+            nx = int(header['NAXIS1'])
+
+            data = np.zeros((npol, nbd, ny, nx))
+            cfreqs = []
+            for sidx, fitsf in enumerate(fits_exist):
+                hdu = fits.open(fitsf)
+                cfreqs.append(hdu[-1].header['RESTFRQ'])
+                for pidx in range(npol):
+                    if hdu[-1].data.ndim == 2:
+                        data[pidx, idx_fits_exist[sidx], :, :] = hdu[-1].data
+                    elif hdu[-1].data.ndim == 3:
+                        data[pidx, idx_fits_exist[sidx], :, :] = hdu[-1].data[pidx, :, :]
+                    else:
+                        data[pidx, idx_fits_exist[sidx], :, :] = hdu[-1].data[pidx, 0, :, :]
+            cfreqs = np.array(cfreqs)
+            cdelts = np.array(cdelts)
+            indfreq = np.argsort(cfreqs)
+            cfreqs = cfreqs[indfreq]
+            cdelts = cdelts[indfreq]
             for pidx in range(npol):
-                if len(hdu[0].data.shape) == 2:
-                    data[pidx, idx_fits_exist[sidx], :, :] = hdu[0].data
+                data[pidx, ...] = data[pidx, indfreq]
+
+            df = np.nanmean(np.diff(cfreqs) / np.diff(idx_fits_exist))  ## in case some of the band is missing
+            header['NAXIS'] = 4
+            header['NAXIS3'] = nband
+            header['CTYPE3'] = 'FREQ'
+            header['CRVAL3'] = cfreqs[0]
+            header['CDELT3'] = df
+            header['CRPIX3'] = 1.0
+            header['CUNIT3'] = 'Hz      '
+            if stokesinfo['axis'] is None:
+                header['NAXIS4'] = 1
+                header['CTYPE4'] = 'STOKES'
+                header['CRVAL4'] = -5  ## assume XX
+                header['CDELT4'] = 1.0
+                header['CRPIX4'] = 1.0
+                header['CUNIT4'] = '        '
+            else:
+                for k, v in stokesinfo['headernew'].items():
+                    print(k, v)
+                    header[k] = v
+        else:
+            if verbose:
+                print('s2')
+            npol = int(header['NAXIS4'])
+            nbd = nband
+            ny = int(header['NAXIS2'])
+            nx = int(header['NAXIS1'])
+
+            data = np.zeros((npol, nbd, ny, nx))
+            cdelts = []
+            cfreqs = []
+            for sidx, fitsf in enumerate(fits_exist):
+                hdu = fits.open(fitsf)
+                cdelts.append(hdu[-1].header['CDELT3'])
+                cfreqs.append(hdu[-1].header['CRVAL3'])
+                for pidx in range(npol):
+                    if hdu[-1].data.ndim == 2:
+                        data[pidx, idx_fits_exist[sidx], :, :] = hdu[-1].data
+                    else:
+                        data[pidx, idx_fits_exist[sidx], :, :] = hdu[-1].data[pidx, 0, :, :]
+            cfreqs = np.array(cfreqs)
+            cdelts = np.array(cdelts)
+            df = np.nanmean(np.diff(cfreqs) / np.diff(idx_fits_exist))  ## in case some of the band is missing
+            header['cdelt3'] = df
+            header['NAXIS3'] = nband
+            header['NAXIS'] = 4
+            header['CRVAL3'] = header['CRVAL3'] - df * idx_fits_exist[0]
+
+        for dim1 in range(1, header['NAXIS'] + 1):
+            for dim2 in range(1, header['NAXIS'] + 1):
+                k = 'PC{:02d}_{:d}'.format(dim1, dim2)
+                if dim1 == dim2:
+                    header[k] = 1.0
                 else:
-                    data[pidx, idx_fits_exist[sidx], :, :] = hdu[0].data[pidx, 0, :, :]
-        cfreqs = np.array(cfreqs)
-        cdelts = np.array(cdelts)
-        df = np.nanmean(np.diff(cfreqs) / np.diff(idx_fits_exist))  ## in case some of the band is missing
-        header['cdelt3'] = df
-        header['NAXIS3'] = nband
-        header['NAXIS'] = 4
-        header['CRVAL3'] = header['CRVAL3'] - df * idx_fits_exist[0]
+                    header[k] = 0.0
+
         if os.path.exists(outfitsfile):
             os.system('rm -rf {}'.format(outfitsfile))
 
         col1 = fits.Column(name='cfreqs', format='E', array=cfreqs)
         col2 = fits.Column(name='cdelts', format='E', array=cdelts)
         tbhdu = fits.BinTableHDU.from_columns([col1, col2])
-        if docompress:
-            dshape = data.shape
-            dim = data.ndim
-            if dim - np.count_nonzero(np.array(dshape) == 1) > 3:
-                pass
-            else:
-                if fix_invalid:
-                    data[np.isnan(data)] = filled_value
-                if kwargs is {}:
-                    kwargs.update({'compression_type': 'RICE_1', 'quantize_level': 4.0})
-                if isinstance(outfitsfile, str):
-                    outfitsfile = os.path.expanduser(outfitsfile)
 
-                header, data = headersqueeze(header, data)
+        if docompress:
+            if fix_invalid:
+                data[np.isnan(data)] = filled_value
+            if kwargs is {}:
+                kwargs.update({'compression_type': 'RICE_1', 'quantize_level': 4.0})
+            if isinstance(outfitsfile, str):
+                outfitsfile = os.path.expanduser(outfitsfile)
+
+            header, data = headersqueeze(header, data)
+            if data.ndim == 4:
+                print('only 1D, 2D, or 3D images are currently supported for compression. Aborting compression...')
+            else:
                 hdunew = fits.CompImageHDU(data=data, header=header, **kwargs)
+
                 if mask is None:
                     hdulnew = fits.HDUList([fits.PrimaryHDU(), hdunew, tbhdu])
                 else:
                     hdumask = fits.CompImageHDU(data=mask.astype(np.uint8), **kwargs)
                     hdulnew = fits.HDUList([fits.PrimaryHDU(), hdunew, tbhdu, hdumask])
                 hdulnew.writeto(outfitsfile, output_verify='fix')
-                return 1
+                return outfitsfile
 
         hdulnew = fits.HDUList([fits.PrimaryHDU(data=data, header=header), tbhdu])
         hdulnew.writeto(outfitsfile)
         print('wrapped fits written as ' + outfitsfile)
-        return 1
+        return outfitsfile
