@@ -126,7 +126,7 @@ class App(QMainWindow):
         self.clevels = np.array([0.3, 0.7])
         self.calpha = 1.
         self.pgcmap = self._create_pgcmap(cmap='viridis', ncolorstop=6)
-        self.savedata=False  ### Surajit edit
+        self.savedata = False  ### Surajit edit
         # initialize the window
         # self.initUI()
         self.initUItab_explorer()
@@ -393,8 +393,6 @@ class App(QMainWindow):
         self.qlookimgbutton.setFixedSize(20, 20)
         self.qlookimgbutton.setCheckable(True)
         self.qlookimgbutton.toggled.connect(self.showqlookimg)
-        
-        
 
         # Create a button to toggle the qlookspec box.
         qlookdspeclabel = QLabel("Spectrogram")
@@ -409,7 +407,7 @@ class App(QMainWindow):
         self.is_calibrated_tp_button = QCheckBox('Is Calibrated TP?')
         self.is_calibrated_tp_button.setChecked(self.is_calibrated_tp)
         self.is_calibrated_tp_button.toggled.connect(self.is_calibrated_tp_state)
-        
+
         ### Surajit: use a button to toogle for saving the fitted spectrum and the data underneath it.
         self.savedata_button = QCheckBox('Save data?')
         self.savedata_button.setChecked(self.savedata)
@@ -423,7 +421,7 @@ class App(QMainWindow):
         qlookbuttonbox_r.addWidget(self.qlookdspecbutton)
         qlookbuttonbox_r.addWidget(qlookdspeclabel)
         qlookbuttonbox_r.addWidget(self.is_calibrated_tp_button)
-        qlookbuttonbox_r.addWidget(self.savedata_button) ## Surajit
+        qlookbuttonbox_r.addWidget(self.savedata_button)  ## Surajit
         qlookbuttonbox.addLayout(qlookbuttonbox_l)
         qlookbuttonbox.addLayout(qlookbuttonbox_r)
         qlookbuttonbox.setStretch(0, 1)
@@ -657,7 +655,7 @@ class App(QMainWindow):
         # Group 2: Fit Method
         self.fit_method_box = QHBoxLayout()
         self.fit_method_selector_widget = QComboBox()
-        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution","mcmc"])
+        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc"])
         self.fit_method_selector_widget.currentIndexChanged.connect(self.fit_method_selector)
         self.fit_method_box.addWidget(QLabel("Fit Method"))
         self.fit_method_box.addWidget(self.fit_method_selector_widget)
@@ -833,7 +831,7 @@ class App(QMainWindow):
         else:
             self.statusBar.showMessage('Loaded spectrogram is *not* calibrated total power dynamic spectrum.')
             self.is_calibrated_tp = False
-            
+
     ## Surajit       
     def savedata_state(self):
         if self.savedata_button.isChecked() == True:
@@ -1063,11 +1061,11 @@ class App(QMainWindow):
             #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
             self.pgdata = self.data[self.pol_select_idx, :, :, :].reshape(
                 (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
-            pos=np.where(self.pgdata>1e9)
-            self.pgdata[pos]=1e9
+            pos = np.where(self.pgdata > 5e9)
+            self.pgdata[pos] = 5e9
             del pos
-            pos=np.where(self.pgdata<-1000)
-            self.pgdata[pos]=-1000
+            pos = np.where(self.pgdata < -1000)
+            self.pgdata[pos] = -1000
             del pos
             # self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs)
             self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs, pos=[self.x0, self.y0],
@@ -1559,13 +1557,13 @@ class App(QMainWindow):
     def exec_customized_rois_window(self):
         try:
             self.customized_rois_Form = QDialog()
-            ui = roiutils.roi_dialog(img_size=[self.meta['nx'], self.meta['ny']], cfreqs = self.cfreqs)
+            ui = roiutils.roi_dialog(img_size=[self.meta['nx'], self.meta['ny']], cfreqs=self.cfreqs)
             ui.setupUi(self.customized_rois_Form)
             self.customized_rois_Form.show()
             cur_result = self.customized_rois_Form.exec()
             crtf_list = ui.getResult(self.customized_rois_Form)
-            print('cur_result: ',crtf_list)
-            return (crtf_list,cur_result)
+            print('cur_result: ', crtf_list)
+            return (crtf_list, cur_result)
         except:
             msg_box = QMessageBox(QMessageBox.Warning, 'No EOVSA Image Loaded', 'Load EOVSA Image first!')
             msg_box.exec_()
@@ -1575,7 +1573,7 @@ class App(QMainWindow):
         if not dialog_output[1] or len(dialog_output[0]) == 0:
             print('No ROI is added!')
         else:
-            roiutils.add_md_rois(self, inp_str_list =dialog_output[0])
+            roiutils.add_md_rois(self, inp_str_list=dialog_output[0])
 
     def calc_roi_spec(self, evt):
         # print('=================Update ROI SPEC===============')
@@ -1612,7 +1610,6 @@ class App(QMainWindow):
 
         for roi in rois2update:
             ## todo: investigate why using axes = (2, 1) returns entirely different (wrong!) results
-
             subim = roi.getArrayRegion(self.pgdata,
                                        self.pg_img_canvas.getImageItem(), axes=(1, 2))
 
@@ -1653,10 +1650,13 @@ class App(QMainWindow):
                 roi.total_flux = ma.masked_array(roi.total_flux, roi.freq_mask)
 
         if 'roi' in vars():
-            self.roi_info.setText('[Current ROI] x: {0:6.1f}", y: {1:6.1f}", freq: {2:4.1f} GHz, '
-                                  'T<sub>B</sub><sup>max</sup>: {3:5.1f} MK, '
-                                  'T<sub>B</sub><sup>mean</sup>: {4:5.1f} MK, Flux: {5:5.1f} sfu'.
+            self.roi_info.setText('[Current ROI] xcen: {0:6.1f}", ycen: {1:6.1f}", '
+                                  'xwid: {2:6.1f}", ywid: {3:6.1f}", '
+                                  'freq: {4:4.1f} GHz, '
+                                  'T<sub>B</sub><sup>max</sup>: {5:5.1f} MK, '
+                                  'T<sub>B</sub><sup>mean</sup>: {6:5.1f} MK, Flux: {6:5.1f} sfu'.
                                   format(roi.pos()[0] + roi.size()[0] / 2, roi.pos()[1] + roi.size()[1] / 2,
+                                         roi.size()[0], roi.size()[1],
                                          self.pg_freq_current,
                                          roi.tb_max[self.pg_freq_idx] / 1e6,
                                          roi.tb_mean[self.pg_freq_idx] / 1e6,
@@ -1850,7 +1850,6 @@ class App(QMainWindow):
 
             self.update_fit_param_widgets()
 
-
         if self.ele_dist == 'thermal f-f + gyrores':
             self.fit_params = lmfit.Parameters()
             self.fit_params.add_many(('Bx100G', 2., True, 0.1, 100., None, None),
@@ -1878,7 +1877,7 @@ class App(QMainWindow):
             self.fit_kws = {'niter': 50, 'T': 90., 'stepsize': 0.8,
                             'interval': 25}
         if self.fit_method == 'mcmc':
-            self.fit_kws ={'steps':1000, 'burn':300, 'thin':10}  
+            self.fit_kws = {'steps': 1000, 'burn': 300, 'thin': 10}
 
     def update_fit_kws_widgets(self):
         # first delete every widget for the fit keywords
@@ -2067,21 +2066,22 @@ class App(QMainWindow):
         if self.fit_method == 'basinhopping':
             fit_kws['minimizer_kwargs'] = {'method': 'Nelder-Mead'}
             max_nfev *= self.fit_kws['niter'] * (self.fit_params_nvarys + 1)
-        if self.fit_method == 'nelder' or self.fit_method=='mcmc':
+        if self.fit_method == 'nelder' or self.fit_method == 'mcmc':
             fit_kws = {'options': self.fit_kws}
-        
+
         print(fit_kws)
 
         if hasattr(self, 'spec_fitplot'):
             self.speccanvas.removeItem(self.spec_fitplot)
         if self.fit_function != gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
-            print ("Not yet implemented")
+            print("Not yet implemented")
         else:
-            if self.fit_method!='mcmc':
+            if self.fit_method != 'mcmc':
                 mini = lmfit.Minimizer(self.fit_function, self.fit_params,
-                                   fcn_args=(freqghz_tofit,),
-                                   fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
-                                   max_nfev=max_nfev, nan_policy='omit')
+                                       fcn_args=(freqghz_tofit,),
+                                       fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit,
+                                                'spec_in_tb': self.spec_in_tb},
+                                       max_nfev=max_nfev, nan_policy='omit')
                 method = self.fit_method
                 mi = mini.minimize(method=method, **fit_kws)
                 print(method + ' minimization results')
@@ -2100,101 +2100,107 @@ class App(QMainWindow):
             else:
                 fit_kws_nelder = {'maxiter': 2000, 'tol': 0.01}
                 mini = lmfit.Minimizer(self.fit_function, self.fit_params,
-                                   fcn_args=(freqghz_tofit,),
-                                   fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
-                                   max_nfev=max_nfev, nan_policy='omit')
+                                       fcn_args=(freqghz_tofit,),
+                                       fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit,
+                                                'spec_in_tb': self.spec_in_tb},
+                                       max_nfev=max_nfev, nan_policy='omit')
                 method = 'Nelder'
                 mi = mini.minimize(method=method, **fit_kws_nelder)
                 fit_params_res = mi.params
                 fit_params_res.add('__lnsigma', value=np.log(0.1), min=np.log(0.001), max=np.log(2))
-                
-                burn=self.fit_kws['burn']
-                thin=self.fit_kws['thin']
-                steps=self.fit_kws['steps']
-               
-                emcee_kws = dict(steps=steps, burn=burn,\
-                                 thin=thin, is_weighted=False,\
-                            progress=True)
+
+                burn = self.fit_kws['burn']
+                thin = self.fit_kws['thin']
+                steps = self.fit_kws['steps']
+
+                emcee_kws = dict(steps=steps, burn=burn, \
+                                 thin=thin, is_weighted=False, \
+                                 progress=True)
                 mini = lmfit.Minimizer(self.fit_function, fit_params_res,
-                                   fcn_args=(freqghz_tofit,),
-                                   fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit, 'spec_in_tb': self.spec_in_tb},
-                                   max_nfev=max_nfev, nan_policy='omit')
+                                       fcn_args=(freqghz_tofit,),
+                                       fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit,
+                                                'spec_in_tb': self.spec_in_tb},
+                                       max_nfev=max_nfev, nan_policy='omit')
                 emcee_params = mini.minimize(method='emcee', **emcee_kws)
                 print(lmfit.report_fit(emcee_params.params))
-                chain=emcee_params.flatchain
-                shape=chain.shape[0]
-                
+                chain = emcee_params.flatchain
+                shape = chain.shape[0]
+
                 for n, key in enumerate(self.fit_params_res):
                     try:
                         self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
                     except KeyError:
                         pass
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
-                
-                for i in range(burn,shape,thin):
-                    for n,key in enumerate(self.fit_params_res):
+
+                for i in range(burn, shape, thin):
+                    for n, key in enumerate(self.fit_params_res):
                         try:
-                            mi.params[key].value=chain[key][i]
+                            mi.params[key].value = chain[key][i]
                         except KeyError:
                             pass
                     spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
                     self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
-                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
-                                                         symbol=None, symbolBrush=None)
-                    self.spec_fitplot.setAlpha(0.01,False)
+                                                             pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                             symbol=None, symbolBrush=None)
+                    self.spec_fitplot.setAlpha(0.01, False)
                     self.speccanvas.addItem(self.spec_fitplot)
-                mi.params=emcee_params.params
+                mi.params = emcee_params.params
             ## Surajit
-            if self.savedata==True:
-                
-                roi_props=(self.rois[self.roi_group_idx][self.current_roi_idx]).saveState()
-                roi_pos=[i for i in roi_props['pos']]
-                roi_size=[i for i in roi_props['size']]
-                roi_angle=roi_props['angle']
+            if self.savedata == True:
+
+                roi_props = (self.rois[self.roi_group_idx][self.current_roi_idx]).saveState()
+                roi_pos = [i for i in roi_props['pos']]
+                roi_size = [i for i in roi_props['size']]
+                roi_angle = roi_props['angle']
                 filename, ok2 = QFileDialog.getSaveFileName(None,
-                                                        "Save the selected group ()",
-                                                        os.getcwd(),
-                                                        "All Files (*)")
+                                                            "Save the selected group ()",
+                                                            os.getcwd(),
+                                                            "All Files (*)")
                 if ok2:
-                    hf=h5py.File(filename,'w')
-                    hf.attrs['roi_pos']=roi_pos
-                    hf.attrs['roi_size']=roi_size
-                    hf.attrs['roi_angle']=roi_angle
-                    hf.attrs['image_file']=self.eoimg_fname
-                    hf.attrs['spec_file']=self.eodspec_fname
-                    hf.attrs['lower_freq']=self.fit_freq_bound[0]
-                    hf.attrs['higher_freq']=self.fit_freq_bound[1]
-                    
+                    hf = h5py.File(filename, 'w')
+                    hf.attrs['roi_pos'] = roi_pos
+                    hf.attrs['roi_size'] = roi_size
+                    hf.attrs['roi_angle'] = roi_angle
+                    hf.attrs['image_file'] = self.eoimg_fname
+                    hf.attrs['spec_file'] = self.eodspec_fname
+                    hf.attrs['lower_freq'] = self.fit_freq_bound[0]
+                    hf.attrs['higher_freq'] = self.fit_freq_bound[1]
+
                     if self.fit_function == gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
-                     
-                        hf.attrs['Bx100G']=np.array([self.fit_params['Bx100G'].init_value,\
-                                                    self.fit_params['Bx100G'].min,self.fit_params['Bx100G'].max,\
-                                                    mi.params['Bx100G'].value,mi.params['Bx100G'].stderr])
-                        hf.attrs['log_nnth']=np.array([self.fit_params['log_nnth'].init_value,\
-                                                    self.fit_params['log_nnth'].min,self.fit_params['log_nnth'].max,\
-                                                    mi.params['log_nnth'].value,mi.params['log_nnth'].stderr])
-                        hf.attrs['delta']=np.array([self.fit_params['delta'].init_value,\
-                                                    self.fit_params['delta'].min,self.fit_params['delta'].max,\
-                                                    mi.params['delta'].value,mi.params['delta'].stderr])
-                        hf.attrs['Emin_keV']=np.array([self.fit_params['Emin_keV'].init_value,\
-                                                    self.fit_params['Emin_keV'].min,self.fit_params['Emin_keV'].max,\
-                                                    mi.params['Emin_keV'].value,mi.params['Emin_keV'].stderr])
-                        hf.attrs['Emax_MeV']=np.array([self.fit_params['Emax_MeV'].init_value,\
-                                                    self.fit_params['Emax_MeV'].min,self.fit_params['Emax_MeV'].max,\
-                                                    mi.params['Emax_MeV'].value,mi.params['Emax_MeV'].stderr])
-                        hf.attrs['theta']=np.array([self.fit_params['theta'].init_value,\
-                                                    self.fit_params['theta'].min,self.fit_params['theta'].max,\
-                                                    mi.params['theta'].value,mi.params['theta'].stderr])
-                        hf.attrs['log_nth']=np.array([self.fit_params['log_nth'].init_value,\
-                                                    self.fit_params['log_nth'].min,self.fit_params['log_nth'].max,\
-                                                    mi.params['log_nth'].value,mi.params['log_nth'].stderr])
-                        hf.attrs['T_MK']=np.array([self.fit_params['T_MK'].init_value,\
-                                                    self.fit_params['T_MK'].min,self.fit_params['T_MK'].max,\
-                                                    mi.params['T_MK'].value,mi.params['T_MK'].stderr])
-                        hf.attrs['depth_asec']=np.array([self.fit_params['depth_asec'].init_value,\
-                                                    self.fit_params['depth_asec'].min,self.fit_params['depth_asec'].max,\
-                                                    mi.params['depth_asec'].value,mi.params['depth_asec'].stderr])
-                        
+                        hf.attrs['Bx100G'] = np.array([self.fit_params['Bx100G'].init_value, \
+                                                       self.fit_params['Bx100G'].min, self.fit_params['Bx100G'].max, \
+                                                       mi.params['Bx100G'].value, mi.params['Bx100G'].stderr])
+                        hf.attrs['log_nnth'] = np.array([self.fit_params['log_nnth'].init_value, \
+                                                         self.fit_params['log_nnth'].min,
+                                                         self.fit_params['log_nnth'].max, \
+                                                         mi.params['log_nnth'].value, mi.params['log_nnth'].stderr])
+                        hf.attrs['delta'] = np.array([self.fit_params['delta'].init_value, \
+                                                      self.fit_params['delta'].min, self.fit_params['delta'].max, \
+                                                      mi.params['delta'].value, mi.params['delta'].stderr])
+                        hf.attrs['Emin_keV'] = np.array([self.fit_params['Emin_keV'].init_value, \
+                                                         self.fit_params['Emin_keV'].min,
+                                                         self.fit_params['Emin_keV'].max, \
+                                                         mi.params['Emin_keV'].value, mi.params['Emin_keV'].stderr])
+                        hf.attrs['Emax_MeV'] = np.array([self.fit_params['Emax_MeV'].init_value, \
+                                                         self.fit_params['Emax_MeV'].min,
+                                                         self.fit_params['Emax_MeV'].max, \
+                                                         mi.params['Emax_MeV'].value, mi.params['Emax_MeV'].stderr])
+                        hf.attrs['theta'] = np.array([self.fit_params['theta'].init_value, \
+                                                      self.fit_params['theta'].min, self.fit_params['theta'].max, \
+                                                      mi.params['theta'].value, mi.params['theta'].stderr])
+                        hf.attrs['log_nth'] = np.array([self.fit_params['log_nth'].init_value, \
+                                                        self.fit_params['log_nth'].min, self.fit_params['log_nth'].max, \
+                                                        mi.params['log_nth'].value, mi.params['log_nth'].stderr])
+                        hf.attrs['T_MK'] = np.array([self.fit_params['T_MK'].init_value, \
+                                                     self.fit_params['T_MK'].min, self.fit_params['T_MK'].max, \
+                                                     mi.params['T_MK'].value, mi.params['T_MK'].stderr])
+                        hf.attrs['depth_asec'] = np.array([self.fit_params['depth_asec'].init_value, \
+                                                           self.fit_params['depth_asec'].min,
+                                                           self.fit_params['depth_asec'].max, \
+                                                           mi.params['depth_asec'].value,
+                                                           mi.params['depth_asec'].stderr])
+
                     if self.spec_in_tb:
                         spec = roi.tb_max
                         spec_bound = self.tb_spec_bound
@@ -2204,17 +2210,20 @@ class App(QMainWindow):
                         spec_bound = self.flx_spec_bound
                         spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
                                                   area=roi.total_area * u.arcsec ** 2, reverse=True).value
-                        hf.attrs['area_asec2']=np.array([self.fit_params['area_asec2'].init_value,\
-                                                    self.fit_params['area_asec2'].min,self.fit_params['area_asec2'].max,\
-                                                    mi.params['area_asec2'].value,mi.params['area_asec2'].stderr])
+                        hf.attrs['area_asec2'] = np.array([self.fit_params['area_asec2'].init_value, \
+                                                           self.fit_params['area_asec2'].min,
+                                                           self.fit_params['area_asec2'].max, \
+                                                           mi.params['area_asec2'].value,
+                                                           mi.params['area_asec2'].stderr])
                     # add fractional err in quadrature
                     spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
-                    hf.create_dataset('observed_spectrum',data=spec)
-                    hf.create_dataset('error',data=spec_err)
-                    hf.create_dataset('obs_freq',data=self.cfreqs)
-                    hf.create_dataset('model_freq',data=freqghz_toplot)
-                    hf.create_dataset('model_spectrum',data=spec_fit_res)
+                    hf.create_dataset('observed_spectrum', data=spec)
+                    hf.create_dataset('error', data=spec_err)
+                    hf.create_dataset('obs_freq', data=self.cfreqs)
+                    hf.create_dataset('model_freq', data=freqghz_toplot)
+                    hf.create_dataset('model_spectrum', data=spec_fit_res)
                     hf.close()
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
