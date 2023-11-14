@@ -832,7 +832,7 @@ class App(QMainWindow):
             self.statusBar.showMessage('Loaded spectrogram is *not* calibrated total power dynamic spectrum.')
             self.is_calibrated_tp = False
 
-    ## Surajit       
+    ## Surajit
     def savedata_state(self):
         if self.savedata_button.isChecked() == True:
             self.statusBar.showMessage('Saving the fit data')
@@ -964,26 +964,29 @@ class App(QMainWindow):
         cts = []
         if self.has_aiamap:
             aiacmap = plt.get_cmap('gray_r')
-            aiamap.plot(axes=ax0, cmap=aiacmap)
+            ax0 = self.update_axes_projection(ax0, projection=aiamap)
+            aiamap.plot(axes=ax0, cmap=aiacmap, clip_interval=(1, 99.99) * u.percent)
             ax0.set_title('')
             aia_tit_str = 'AIA {0:.0f} at {1:s}'.format(aiamap.wavelength.value, aiamap.date.isot[:19])
             ax0.text(0.02, 0.98, aia_tit_str, ha='left', va='top', transform=ax0.transAxes, fontsize=10)
         if self.has_eovsamap:
+            if not self.has_aiamap:
+                ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
+            bounds = ax0.axis()
             for s, sp in enumerate(self.cfreqs):
                 data = self.data[self.pol_select_idx, s, ...]
-                clvls = self.clevels * np.nanmax(data)
+                cur_sunmap = smap.Map(data, self.meta['refmap'].meta)
+                clvls = self.clevels * np.nanmax(data) * u.K
                 rcmap = [icmap(self.freq_dist(self.cfreqs[s]))] * len(clvls)
-                if self.opencontour:
-                    cts.append(ax0.contour(self.mapx, self.mapy, data, levels=clvls,
-                                           colors=rcmap,
-                                           alpha=self.calpha))
-                else:
-                    cts.append(ax0.contourf(self.mapx, self.mapy, data, levels=clvls,
-                                            colors=rcmap,
-                                            alpha=self.calpha))
+                cts.append(cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha))
+                if not self.opencontour:
+                    continue
+                    # todo
+            if self.has_aiamap:
+                ax0.axis(bounds)
 
-        ax0.set_xlim([-1200, 1200])
-        ax0.set_ylim([-1200, 1200])
+        # ax0.set_xlim([-1200, 1200])
+        # ax0.set_ylim([-1200, 1200])
         ax0.set_xlabel('Solar X [arcsec]')
         ax0.set_ylabel('Solar Y [arcsec]')
         # ax0.set_title('')
@@ -1051,6 +1054,13 @@ class App(QMainWindow):
                                                       hspace=0, wspace=0)
         self.qlookdspec_canvas.draw()
 
+    def update_axes_projection(self, cax, projection):
+        pos = cax.get_position()
+        cfig = self.qlookimg_canvas.figure
+        cfig.delaxes(cax)
+        new_ax = cfig.add_axes(pos, projection=projection)
+        return new_ax
+
     def plot_pg_eovsamap(self):
         """This is to plot the eovsamap with the pyqtgraph's ImageView Widget"""
         if self.has_eovsamap:
@@ -1061,8 +1071,8 @@ class App(QMainWindow):
             #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
             self.pgdata = self.data[self.pol_select_idx, :, :, :].reshape(
                 (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
-            pos = np.where(self.pgdata > 5e9)
-            self.pgdata[pos] = 5e9
+            pos = np.where(self.pgdata > 1e9)
+            self.pgdata[pos] = 1e9
             del pos
             pos = np.where(self.pgdata < -1000)
             self.pgdata[pos] = -1000
@@ -1610,6 +1620,7 @@ class App(QMainWindow):
 
         for roi in rois2update:
             ## todo: investigate why using axes = (2, 1) returns entirely different (wrong!) results
+
             subim = roi.getArrayRegion(self.pgdata,
                                        self.pg_img_canvas.getImageItem(), axes=(1, 2))
 
