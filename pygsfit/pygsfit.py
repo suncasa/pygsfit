@@ -2018,6 +2018,7 @@ class App(QMainWindow):
     def showqlookimg(self):
         for i in range(self.qlookimgbox.count()):
             self.qlookimgbox.itemAt(i).widget().deleteLater()
+
         if self.qlookimgbutton.isChecked():
             self.qlookimg_canvas = FigureCanvas(Figure(figsize=(6, 4)))
             self.qlookimg_toolbar = NavigationToolbar(self.qlookimg_canvas, self)
