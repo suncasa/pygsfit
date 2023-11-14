@@ -1661,10 +1661,13 @@ class App(QMainWindow):
                 roi.total_flux = ma.masked_array(roi.total_flux, roi.freq_mask)
 
         if 'roi' in vars():
-            self.roi_info.setText('[Current ROI] x: {0:6.1f}", y: {1:6.1f}", freq: {2:4.1f} GHz, '
-                                  'T<sub>B</sub><sup>max</sup>: {3:5.1f} MK, '
-                                  'T<sub>B</sub><sup>mean</sup>: {4:5.1f} MK, Flux: {5:5.1f} sfu'.
+            self.roi_info.setText('[Current ROI] xcen: {0:6.1f}", ycen: {1:6.1f}", '
+                                  'xwid: {2:6.1f}", ywid: {3:6.1f}", '
+                                  'freq: {4:4.1f} GHz, '
+                                  'T<sub>B</sub><sup>max</sup>: {5:5.1f} MK, '
+                                  'T<sub>B</sub><sup>mean</sup>: {6:5.1f} MK, Flux: {6:5.1f} sfu'.
                                   format(roi.pos()[0] + roi.size()[0] / 2, roi.pos()[1] + roi.size()[1] / 2,
+                                         roi.size()[0], roi.size()[1],
                                          self.pg_freq_current,
                                          roi.tb_max[self.pg_freq_idx] / 1e6,
                                          roi.tb_mean[self.pg_freq_idx] / 1e6,
@@ -2015,6 +2018,7 @@ class App(QMainWindow):
     def showqlookimg(self):
         for i in range(self.qlookimgbox.count()):
             self.qlookimgbox.itemAt(i).widget().deleteLater()
+
         if self.qlookimgbutton.isChecked():
             self.qlookimg_canvas = FigureCanvas(Figure(figsize=(6, 4)))
             self.qlookimg_toolbar = NavigationToolbar(self.qlookimg_canvas, self)
