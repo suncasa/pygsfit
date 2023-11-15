@@ -277,6 +277,10 @@ class App(QMainWindow):
 
         # Creating menus using a title
         editMenu = menubar.addMenu("&Edit")
+        paramsMenu = menubar.addMenu("&Params")
+        action_RestoInit = QAction("Result to Initial", self)
+        action_RestoInit.triggered.connect(self.update_init_guess)
+        paramsMenu.addAction(action_RestoInit)
         # helpMenu = menuBar.addMenu(" &Help")
         # self.menu_layout.addWidget(menuBar)
 
@@ -1998,6 +2002,12 @@ class App(QMainWindow):
             self.fit_params[key].value = self.param_init_value_widgets[n].value()
             if self.fit_params[key].vary:
                 self.fit_params_nvarys += 1
+
+    def update_init_guess(self):
+        # Paste the fitting result to the initial value
+        for n, key in enumerate(self.fit_params):
+            self.param_init_value_widgets[n].setValue(self.fit_params_res[key].value)
+            self.fit_params[key].init_value = self.fit_params_res[key].value
 
     def tb_flx_btnstate(self):
         if self.plot_tb_button.isChecked() == True:
