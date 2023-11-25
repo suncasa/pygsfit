@@ -470,7 +470,9 @@ class App(QMainWindow):
         self.add_to_roigroup_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.add_to_roigroup_button.setMenu(QMenu(self.add_to_roigroup_button))
         self.add_to_roigroup_widget = QListWidget()
-        self.add_to_roigroup_widget.addItems(['0', '1', '2'])  ##todo: update ROI group # on the fly
+        self.add_to_roigroup_widget.addItems([str(i) for i in range(len(self.rois)+1)])
+        #self.add_to_roigroup_widget.addItems(['0', '1', '2'])  ##todo: update ROI group # on the fly
+        #The roi group wouldn't be changed until a new roi is add to the target group
         self.add_to_roigroup_widget.itemClicked.connect(self.add_to_roigroup_selection)
         action = QWidgetAction(self.add_to_roigroup_button)
         action.setDefaultWidget(self.add_to_roigroup_widget)
@@ -537,7 +539,8 @@ class App(QMainWindow):
         self.roigroup_selection_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.roigroup_selection_button.setMenu(QMenu(self.roigroup_selection_button))
         self.roigroup_selection_widget = QListWidget()
-        self.roigroup_selection_widget.addItems(['0', '1', '2'])  ##todo: update ROI group list on the fly
+        self.roigroup_selection_widget.addItems([str(i) for i in range(len(self.rois))])
+        #self.roigroup_selection_widget.addItems(['0', '1', '2'])  ##todo: update ROI group list on the fly
         self.roigroup_selection_widget.itemClicked.connect(self.roigroup_selection)
         action = QWidgetAction(self.roigroup_selection_button)
         action.setDefaultWidget(self.roigroup_selection_widget)
@@ -1179,6 +1182,16 @@ class App(QMainWindow):
         self.plot_pgspec()
         self.pgspec_add_boundbox()
 
+    def update_rois_on_canvas(self):
+        plot_item = self.pg_img_canvas.getView()
+        for item in plot_item.items:
+            if item.__class__.__module__ == pg.graphicsItems.ROI.__name__:
+                self.pg_img_canvas.getView().removeItem(item)
+        for current_roi in self.rois[self.roi_group_idx]:
+            self.pg_img_canvas.getView().addItem(current_roi)
+        self.pg_img_canvas.update()
+        ##todo: not all the rois on the canvas can not be removed, seems to be random
+
     def plot_pgspec(self):
         self.update_fitmask()
         if self.spec_in_tb:
@@ -1473,7 +1486,7 @@ class App(QMainWindow):
         self.new_roi.sigRemoveRequested.connect(self.remove_ROI)
 
         # choose which group to add
-        self.add_to_roigroup_selection()
+        #self.add_to_roigroup_selection()
         if self.roi_type in ["LineSegmentROI", "PolyLineROI"]:
             self.new_roi.type = "sliceROI"
             self.new_roi.childROI = {}
@@ -1484,13 +1497,14 @@ class App(QMainWindow):
                 self.new_roi.parentROI = lastsliceROI
                 self.new_roi.childROIkey = nchildROI
                 self.new_roi.parentROI.childROI[self.new_roi.childROIkey] = self.new_roi
-
+        print('New ROI has been added to group {}'.format(self.roi_group_idx))
         self.rois[self.roi_group_idx].append(self.new_roi)
         self.nroi_current_group = len(self.rois[self.roi_group_idx])
         self.roi_selection_widget.clear()
         self.roi_selection_widget.addItems([str(i) for i in range(self.nroi_current_group)])
         self.current_roi_idx = self.nroi_current_group - 1
         self.new_roi.roi_id = self.current_roi_idx
+        self.roi_selection_button.setText(str(self.current_roi_idx))
         self.has_rois = True
         # self.roi_freq_lowbound_selector.setValue(self.data_freq_bound[0])
         # self.roi_freq_hibound_selector.setValue(self.data_freq_bound[1])
@@ -1535,14 +1549,28 @@ class App(QMainWindow):
     # self.view.scene().removeItem(evt)
 
     # ROI = None
-
+    # def add_to_roigroup_selection(self, swith_roi_group):
+    #     items = self.add_to_roigroup_widget.selectedItems()
+    #     if len(items) > 0:
+    #         self.add_to_roigroup_button.setText(items[0].text())
+    #         if swith_roi_group:
+    #             self.roi_group_idx = int(items[0].text())
+    #     else:
+    #         if swith_roi_group:
+    #             self.roi_group_idx = 0
     def add_to_roigroup_selection(self):
         items = self.add_to_roigroup_widget.selectedItems()
         if len(items) > 0:
             self.add_to_roigroup_button.setText(items[0].text())
             self.roi_group_idx = int(items[0].text())
+            if self.roi_group_idx > len(self.rois)-1:
+                self.rois.append([])
         else:
             self.roi_group_idx = 0
+        #print('Current roi group is ', self.roi_group_idx)
+        self.roi_group_selection_update()
+        self.update_pgspec()
+        self.update_rois_on_canvas()
 
     def roigroup_selection(self):
         items = self.roigroup_selection_widget.selectedItems()
@@ -1551,6 +1579,9 @@ class App(QMainWindow):
             self.roi_group_idx = int(items[0].text())
         else:
             self.roi_group_idx = 0
+        self.update_pgspec()
+        self.roi_group_selection_update()
+        self.update_rois_on_canvas()
 
     def roi_selection_action(self):
         items = self.roi_selection_widget.selectedItems()
@@ -1561,6 +1592,21 @@ class App(QMainWindow):
             self.current_roi_idx = len(self.rois[self.roi_group_idx]) - 1
         self.update_pgspec()
         # print(self.current_roi_idx)
+
+    def roi_group_selection_update(self):
+        self.nroi_group = len(self.rois)
+        self.roigroup_selection_widget.clear()
+        self.roigroup_selection_widget.addItems([str(i) for i in range(len(self.rois))])
+        self.roigroup_selection_button.setText(str(self.roi_group_idx))
+        self.add_to_roigroup_widget.clear()
+        self.add_to_roigroup_widget.addItems([str(i) for i in range(len(self.rois) + 1)])
+        self.add_to_roigroup_button.setText(str(self.roi_group_idx))
+        self.nroi_current_group = len(self.rois[self.roi_group_idx])
+        self.roi_selection_widget.clear()
+        self.roi_selection_widget.addItems([str(i) for i in range(self.nroi_current_group)])
+        self.current_roi_idx = max(self.nroi_current_group - 1,0)
+        self.roi_selection_button.setText(str(self.current_roi_idx))
+        self.update_pgspec()
 
     def group_roi_op_selector(self):
         cur_action = self.sender()
