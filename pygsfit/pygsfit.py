@@ -472,7 +472,6 @@ class App(QMainWindow):
         self.add_to_roigroup_widget = QListWidget()
         self.add_to_roigroup_widget.addItems([str(i) for i in range(len(self.rois)+1)])
         #self.add_to_roigroup_widget.addItems(['0', '1', '2'])  ##todo: update ROI group # on the fly
-        #The roi group wouldn't be changed until a new roi is add to the target group
         self.add_to_roigroup_widget.itemClicked.connect(self.add_to_roigroup_selection)
         action = QWidgetAction(self.add_to_roigroup_button)
         action.setDefaultWidget(self.add_to_roigroup_widget)
@@ -1549,15 +1548,6 @@ class App(QMainWindow):
     # self.view.scene().removeItem(evt)
 
     # ROI = None
-    # def add_to_roigroup_selection(self, swith_roi_group):
-    #     items = self.add_to_roigroup_widget.selectedItems()
-    #     if len(items) > 0:
-    #         self.add_to_roigroup_button.setText(items[0].text())
-    #         if swith_roi_group:
-    #             self.roi_group_idx = int(items[0].text())
-    #     else:
-    #         if swith_roi_group:
-    #             self.roi_group_idx = 0
     def add_to_roigroup_selection(self):
         items = self.add_to_roigroup_widget.selectedItems()
         if len(items) > 0:
@@ -1567,7 +1557,6 @@ class App(QMainWindow):
                 self.rois.append([])
         else:
             self.roi_group_idx = 0
-        #print('Current roi group is ', self.roi_group_idx)
         self.roi_group_selection_update()
         self.update_pgspec()
         self.update_rois_on_canvas()
