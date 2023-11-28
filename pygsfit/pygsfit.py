@@ -28,7 +28,7 @@ filedir = os.path.dirname(os.path.realpath(__file__))
 print(filedir)
 sys.path.append(filedir)
 from utils import gstools, roiutils
-from utils.roiutils import PolyLineROIX
+from utils.roiutils import PolyLineROIX, Grid_Dialog
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -100,6 +100,7 @@ class App(QMainWindow):
         self.has_aiamap = False
         self.has_bkg = False
         self.has_rois = False
+        self.has_grid_rois = False
         self.fbar = None
         self.data_freq_bound = [1.0, 18.0]  # Initial Frequency Bound of the instrument
         self.tb_spec_bound = [1e3, 5e9]  # Bound of brightness temperature; the lower bound is set to the fit limit
@@ -112,9 +113,11 @@ class App(QMainWindow):
         self.spec_dataplots_tofit = []
         self.roi_grid_size = 2
         self.rois = [[]]
+        self.grid_rois = []
         self.roi_group_idx = 0
         self.nroi_current_group = 0
         self.current_roi_idx = 0
+        self.number_grid_rois = 0
         self.distSpecCanvasSet = {}
         self.pol_select_idx = 0
         self.spec_in_tb = True
@@ -123,7 +126,7 @@ class App(QMainWindow):
         self.qlookdspec_ax = None
         # some controls for qlookplot
         self.opencontour = True
-        self.clevels = np.array([0.3, 0.7])
+        self.clevels = np.array([0.7])
         self.calpha = 1.
         self.pgcmap = self._create_pgcmap(cmap='viridis', ncolorstop=6)
         self.savedata = False  ### Surajit edit
@@ -514,15 +517,23 @@ class App(QMainWindow):
         self.add_roi_grid_button = QPushButton("Add ROI Grid")
         self.add_roi_grid_button.setStyleSheet("background-color : lightgrey")
         roi_grid_box.addWidget(self.add_roi_grid_button)
+        self.add_roi_grid_button.clicked.connect(self.open_grid_window)
 
-        self.roi_grid_size_selector = QSpinBox()
-        self.roi_grid_size_selector.setRange(1, 1000)
-        self.roi_grid_size_selector.setSingleStep(1)
-        self.roi_grid_size_selector.setValue(2)
-        self.roi_grid_size_selector.valueChanged.connect(self.roi_grid_size_valuechange)
-        roi_grid_box.addWidget(QLabel("Grid Size (pix)"))
-        roi_grid_box.addWidget(self.roi_grid_size_selector)
+        # self.roi_grid_size_selector = QSpinBox()
+        # self.roi_grid_size_selector.setRange(1, 1000)
+        # self.roi_grid_size_selector.setSingleStep(1)
+        # self.roi_grid_size_selector.setValue(2)
+        #self.roi_grid_size_selector.valueChanged.connect(self.roi_grid_size_valuechange)
+        #roi_grid_box.addWidget(QLabel("Grid Size (pix)"))
+        #roi_grid_box.addWidget(self.roi_grid_size_selector)
         roi_definition_group_box.addLayout(roi_grid_box)
+        self.grid_roi_number_lcd = QLCDNumber()
+        self.grid_roi_number_lcd.setObjectName("gridRoiNumber")
+        self.grid_roi_number_lcd.setStyleSheet("QLCDNumber { background-color: grey; color: green; }")
+        self.grid_roi_number_lcd.display(self.number_grid_rois)
+        roi_grid_box.addWidget(self.grid_roi_number_lcd)
+        roi_definition_group_box.addLayout(roi_grid_box)
+
 
         fit_layout.addWidget(roi_definition_group)
         # Group 2: ROI Selection Group
@@ -1479,7 +1490,8 @@ class App(QMainWindow):
             self.new_roi.addRotateHandle([1.0, 0.5], [0.5, 0.5])
 
         self.new_roi.ischildROI = ischildROI
-        self.pg_img_canvas.addItem(self.new_roi)
+        if self.vis_roi:
+            self.pg_img_canvas.addItem(self.new_roi)
         self.new_roi.freq_mask = np.ones_like(self.cfreqs) * False
         self.new_roi.sigRegionChanged.connect(self.calc_roi_spec)
         self.new_roi.sigRemoveRequested.connect(self.remove_ROI)
@@ -1498,18 +1510,20 @@ class App(QMainWindow):
                 self.new_roi.parentROI.childROI[self.new_roi.childROIkey] = self.new_roi
         print('New ROI has been added to group {}'.format(self.roi_group_idx))
         self.rois[self.roi_group_idx].append(self.new_roi)
-        self.nroi_current_group = len(self.rois[self.roi_group_idx])
-        self.roi_selection_widget.clear()
-        self.roi_selection_widget.addItems([str(i) for i in range(self.nroi_current_group)])
-        self.current_roi_idx = self.nroi_current_group - 1
         self.new_roi.roi_id = self.current_roi_idx
-        self.roi_selection_button.setText(str(self.current_roi_idx))
-        self.has_rois = True
+        self.nroi_current_group = len(self.rois[self.roi_group_idx])
+
+        if self.vis_roi:
+            self.roi_selection_widget.clear()
+            self.roi_selection_widget.addItems([str(i) for i in range(self.nroi_current_group)])
+            self.current_roi_idx = self.nroi_current_group - 1
+            self.roi_selection_button.setText(str(self.current_roi_idx))
+            self.has_rois = True
         # self.roi_freq_lowbound_selector.setValue(self.data_freq_bound[0])
         # self.roi_freq_hibound_selector.setValue(self.data_freq_bound[1])
-        if self.new_roi.type == "sliceROI":
-            self.init_pgdistspec_widget()
-        self.calc_roi_spec(None)
+            if self.new_roi.type == "sliceROI":
+                self.init_pgdistspec_widget()
+            self.calc_roi_spec(None)
 
         # self.roi_slider_rangechange()
 
@@ -1558,7 +1572,6 @@ class App(QMainWindow):
         else:
             self.roi_group_idx = 0
         self.roi_group_selection_update()
-        self.update_pgspec()
         self.update_rois_on_canvas()
 
     def roigroup_selection(self):
@@ -1568,7 +1581,6 @@ class App(QMainWindow):
             self.roi_group_idx = int(items[0].text())
         else:
             self.roi_group_idx = 0
-        self.update_pgspec()
         self.roi_group_selection_update()
         self.update_rois_on_canvas()
 
@@ -1602,6 +1614,59 @@ class App(QMainWindow):
         cur_op = cur_action.text()
         if cur_op == 'Save Group':
             roiutils.save_roi_group(self)
+
+    def open_grid_window(self):
+        # self.grid_dialog = Grid_Dialog(pygsfit_object=self)
+        # self.grid_dialog.accepted.connect(self.handle_grid_rois)
+        # self.grid_dialog.exec_()
+        #self.grid_dialog = QDialog()
+        ui = Grid_Dialog(self,pygsfit_object=self)
+        ui.setupUi(ui)
+        ui.data_transmitted.connect(self.handle_grid_rois)
+        ui.show()
+        ui.exec_()
+        # self.grid_dialog.on_confirm.connect(self.handle_grid_rois)
+        # self.grid_dialog.show()
+        # self.grid_dialog.exec_()
+
+
+    def handle_grid_rois(self, recieved_rois):
+        self.vis_roi = True
+        if len(recieved_rois[0]) > 20:
+            self.vis_roi = False
+        self.grid_rois = []
+        self.rois.append([])
+        self.roi_group_idx += 1
+        self.rectButton.setChecked(True)
+        for cri, crect in enumerate(recieved_rois[0]):
+            print(cri)
+            self.xcen = crect[0][0]
+            self.ycen = crect[0][1]
+            self.xsiz = crect[1][0]*20.0
+            self.ysiz = crect[1][1]*20.0
+            self.add_new_roi()
+        self.xsiz, self.ysiz = [self.meta['nx'] * self.dx,
+                                    self.meta['ny'] * self.dy]
+        self.xcen, self.ycen = [(self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0]
+        self.grid_rois = self.rois[-1]
+        if len(recieved_rois[0]) >20:
+            cmsgBox = QMessageBox()
+            cmsgBox.setText("ROIs are save, but the number of ROIs > 20, ROIs will not be displayed")
+            cmsgBox.addButton("No Problem", QMessageBox.AcceptRole)
+            cmsgBox.exec_()
+            self.rois.pop()
+            self.roi_group_idx -= 1
+            self.nroi_current_group = len(self.rois[self.roi_group_idx])
+        self.number_grid_rois = len(self.grid_rois)
+        self.grid_roi_number_lcd.display(self.number_grid_rois)
+        self.has_grid_rois=True
+        self.roi_group_selection_update()
+        self.update_rois_on_canvas()
+
+    def group_of_rois_to_binary_map(self):
+        #convert a group of ROIs to a map filled with task index
+        ##todo convert to binary map for batch mode
+        pass
 
     def exec_customized_rois_window(self):
         try:
@@ -1825,8 +1890,8 @@ class App(QMainWindow):
         roi.tb_mean = ma.masked_array(roi.tb_mean, roi.freq_mask)
         roi.total_flux = ma.masked_array(roi.total_flux, roi.freq_mask)
 
-    def roi_grid_size_valuechange(self):
-        self.roi_grid_size = self.roi_grid_size_selector.value()
+    # def roi_grid_size_valuechange(self):
+    #     self.roi_grid_size = self.roi_grid_size_selector.value()
 
     def freq_lowbound_valuechange(self):
         self.fit_freq_bound[0] = self.freq_lowbound_selector.value()
