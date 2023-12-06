@@ -114,6 +114,7 @@ class App(QMainWindow):
         self.roi_grid_size = 2
         self.rois = [[]]
         self.grid_rois = []
+        self.vis_roi = True
         self.roi_group_idx = 0
         self.nroi_current_group = 0
         self.current_roi_idx = 0
@@ -136,6 +137,8 @@ class App(QMainWindow):
         # ## quick input for debug --------------
         # self.eoimg_file_select()
         # ## quick input for debug --------------
+        self.eoimg_fname = '/Users/walterwei/Downloads/20220511/slf_final_XX_t19_allbd.fits'
+        self.eoimg_file_select_return()
 
     def _create_pgcmap(self, cmap='viridis', ncolorstop=6):
         """This is to create the cmap for pyqtgraph's ImageView Widgets"""

@@ -20,6 +20,7 @@ from scipy.spatial import ConvexHull
 from matplotlib.patches import Polygon, Rectangle
 from matplotlib.collections import LineCollection, QuadMesh
 from shapely.geometry import LineString, box, Point
+from .gstools import sfu2tb
 
 class LineSegmentROIX(pg.ROI):
     r"""
@@ -506,7 +507,7 @@ class Grid_Dialog(QDialog):
         self.num_sides = 12
         self.start_freq_idx = 2
         self.end_freq_idx = 30
-        self.rms_factor = 30
+        self.custom_factor = 6.e6
         self.n_sources = 1
         self.grid_size = 2
         # Plot area
@@ -590,10 +591,23 @@ class Grid_Dialog(QDialog):
         self.spinBox_5.setValue(self.start_freq_idx)
         self.spinBox_5.valueChanged.connect(self.update_plot)
 
-        self.checkbox = QCheckBox('Use RMS', Dialog)
-        self.checkbox.setGeometry(QRect(700, 100, 90, 16))
-        self.checkbox.setObjectName("use_rms")
-        self.checkbox.setChecked(False)
+        self.checkbox_u = QCheckBox('CustThresh:', Dialog)
+        self.checkbox_u.setGeometry(QRect(690, 100, 100, 16))
+        self.checkbox_u.setObjectName("CustThresh")
+        self.checkbox_u.setChecked(False)
+
+        self.lineEdit_u = QLineEdit(Dialog)
+        self.lineEdit_u.setGeometry(QRect(690, 130, 110, 21))
+        self.lineEdit_u.setObjectName("lineEdit_u")
+        self.lineEdit_u.setText(str(self.custom_factor))
+
+        self.combo_box_u = QComboBox(Dialog)
+        self.combo_box_u.setGeometry(QRect(810, 130, 62, 21))
+        self.combo_box_u.setObjectName("combo_box_u")
+        self.combo_box_u.addItem('K')
+        self.combo_box_u.addItem('sfu')
+        self.combo_box_u.addItem('RMS')
+        self.combo_box_u.setCurrentIndex(0)
 
         self.spinBox_6 = QSpinBox(Dialog)
         self.spinBox_6.setGeometry(QRect(800, 420, 42, 22))
@@ -607,19 +621,11 @@ class Grid_Dialog(QDialog):
         self.label_6 = QLabel(Dialog)
         self.label_6.setGeometry(QRect(800, 400, 60, 16))
         self.label_6.setObjectName("label_6")
-        # self.label_check = QLabel(Dialog)
-        # self.label_check.setGeometry(QRect(800, 100, 60, 16))
-        # self.label_check.setObjectName("label_check")
+
         self.label_7 = QLabel(Dialog)
-        self.label_7.setGeometry(QRect(750, 20, 91, 20))
+        self.label_7.setGeometry(QRect(700, 20, 150, 20))
         self.label_7.setObjectName("label_7")
-        self.lineEdit = QLineEdit(Dialog)
-        self.lineEdit.setGeometry(QRect(802, 520, 51, 21))
-        self.lineEdit.setObjectName("lineEdit")
-        self.lineEdit.setText(str(self.rms_factor))
-        self.label_8 = QLabel(Dialog)
-        self.label_8.setGeometry(QRect(730, 520, 71, 20))
-        self.label_8.setObjectName("label_8")
+
 
         self.pushButton_2 = QPushButton(Dialog)
         self.pushButton_2.setGeometry(QRect(70, 590, 81, 32))
@@ -640,6 +646,9 @@ class Grid_Dialog(QDialog):
         self.horizontalSlider_2.setValue(self.grid_size)
         self.horizontalSlider_2.valueChanged.connect(self.update_grid_size)
 
+        self.label_grid_size = QLabel(Dialog)
+        self.label_grid_size.setGeometry(QRect(670, 180, 70, 20))
+        self.label_grid_size.setObjectName("label_grid_size")
         self.lcdNumber = QLCDNumber(Dialog)
         self.lcdNumber.setGeometry(QRect(740, 180, 64, 23))
         self.lcdNumber.setObjectName("lcdNumber")
@@ -659,7 +668,8 @@ class Grid_Dialog(QDialog):
         self.label_5.setText(_translate("Dialog", "fStart"))
         self.label_6.setText(_translate("Dialog", "fEnd"))
         self.label_7.setText(_translate("Dialog", "contour level"))
-        self.label_8.setText(_translate("Dialog", "RMS factor"))
+        self.label_grid_size.setText(_translate("Dialog", "Grid Size:"))
+        #self.label_8.setText(_translate("Dialog", "RMS factor"))
         #self.label_check.setText(_translate("Dialog", "use rms"))
         self.pushButton_2.setText(_translate("Dialog", "Exist Roi"))
         self.pushButton_3.setText(_translate("Dialog", "Grid"))
@@ -668,6 +678,7 @@ class Grid_Dialog(QDialog):
     def update_plot(self):
         try:
             self.contour_level = np.array([self.horizontalSlider.value() / 100.0])
+            self.label_7.setText("contour level:{0}%".format(self.horizontalSlider.value()))
             self.start_freq_idx = self.spinBox_5.value()
             self.end_freq_idx = self.spinBox_6.value()
         except:
@@ -717,15 +728,20 @@ class Grid_Dialog(QDialog):
         self.end_freq_idx = self.spinBox_6.value()
         images = cdata[0, self.start_freq_idx:self.end_freq_idx, ...]
         rms = self.pygsfit_object.bkg_roi.tb_rms[self.start_freq_idx:self.end_freq_idx]
-        self.rms_factor = float(self.lineEdit.text())
+        self.custom_factor = float(self.lineEdit_u.text())
         self.n_sources = self.spinBox_2.value()
         self.num_sides = self.spinBox.value()
         combined_thresholded = np.zeros_like(images[0], dtype=bool)
 
         for i_idx, image in enumerate(images):
-            #if i_idx!=0: continue
-            if self.checkbox.isChecked() == True:
-                threshold = rms[i_idx] * self.rms_factor
+            if self.checkbox_u.isChecked() == True:
+                if self.combo_box_u.currentText() == 'K':
+                    threshold = self.custom_factor
+                elif self.combo_box_u.currentText() == 'sfu':
+                    threshold = sfu2tb(self.pygsfit_object.cfreqs[i_idx+self.start_freq_idx] * 1e9 * u.Hz, self.custom_factor * u.jansky * 1e4,
+                                              area=self.pygsfit_object.dx * self.pygsfit_object.dy * u.arcsec ** 2, reverse=False).value
+                elif self.combo_box_u.currentText() == 'RMS':
+                    threshold = rms[i_idx] * self.custom_factor
             else:
                 threshold = np.max(image) * self.contour_level[0]
             thresholded_image = image > threshold
@@ -736,8 +752,6 @@ class Grid_Dialog(QDialog):
         region_sizes = [(i, np.sum(self.labeled_image == i)) for i in range(1, self.num_features + 1)]
         region_sizes.sort(key=lambda x: x[1], reverse=True)
         self.auto_rois_points = []
-        #self.world_coord = []
-        #self.pix_coord = []
         self.all_poly = []
         for ridx_, (region_index, _) in enumerate(region_sizes[:self.n_sources]):
             positions = np.argwhere(self.labeled_image == region_index)
