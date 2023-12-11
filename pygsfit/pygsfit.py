@@ -2154,8 +2154,10 @@ class App(QMainWindow):
                 chain = emcee_params.flatchain
                 shape = chain.shape[0]
 
-                
+
                 for n, key in enumerate(fit_params_res):
+                    if key=='lnf':
+                        continue
                     try:
                     #TODO
                         self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
