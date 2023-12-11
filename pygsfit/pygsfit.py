@@ -2067,6 +2067,21 @@ class App(QMainWindow):
             self.qlookdspecbox.parent().setStretch(1, 0)
             self.qlookdspecbox.parent().setStretch(2, 0)
 
+    def emcee_lnprob_werr(self,params,freqs,spec=None,spec_err=None,spec_in_tb=True):
+        #### we are not suppling the spec_err here to ensure that
+        #### we get the original unscaled residuals. We will treat
+        #### the errors by hand later.
+        residual_orig = self.fit_function(params, freqs, \
+                            spec=spec, spec_in_tb=spec_in_tb)
+        model = residual_orig + spec
+        lnf = float(params['lnf'].value)
+        inv_sigma2 = 1.0 / (spec_err ** 2. + model ** 2 * np.exp(2 * lnf))
+        num_freqs=freqs.size
+        val=((residual_orig) ** 2 * inv_sigma2 - np.log(inv_sigma2))
+        #### lmfit expects an array. But these residuals will anyway be sqaured and summed up
+        #### after multiplying with -0.5. So I am passing an array of same numbers
+        return val
+        
     def do_spec_fit(self):
         roi = self.rois[self.roi_group_idx][self.current_roi_idx]
         freqghz_tofit = roi.freqghz_tofit.compressed()
@@ -2098,10 +2113,10 @@ class App(QMainWindow):
                 mi = mini.minimize(method=method, **fit_kws)
                 print(method + ' minimization results')
                 print(lmfit.fit_report(mi, show_correl=True))
-                self.fit_params_res = mi.params
+                fit_params_res = mi.params
                 print('==========Fit Parameters Updated=======')
-                for n, key in enumerate(self.fit_params_res):
-                    self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+                for n, key in enumerate(fit_params_res):
+                    self.param_fit_value_widgets[n].setValue(fit_params_res[key].value)
 
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
                 spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
@@ -2119,26 +2134,30 @@ class App(QMainWindow):
                 method = 'Nelder'
                 mi = mini.minimize(method=method, **fit_kws_nelder)
                 fit_params_res = mi.params
-                fit_params_res.add('__lnsigma', value=np.log(0.1), min=np.log(0.001), max=np.log(2))
+                fit_params_res.add('lnf', value=np.log(0.1), min=np.log(0.001), max=np.log(2))
+                
 
                 burn = self.fit_kws['burn']
                 thin = self.fit_kws['thin']
                 steps = self.fit_kws['steps']
 
                 emcee_kws = dict(steps=steps, burn=burn, \
-                                 thin=thin, is_weighted=False, \
+                                 thin=thin, is_weighted=True, \
                                  progress=True)
-                mini = lmfit.Minimizer(self.fit_function, fit_params_res,
+                mini = lmfit.Minimizer(self.emcee_lnprob_werr, fit_params_res,
                                        fcn_args=(freqghz_tofit,),
                                        fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit,
-                                                'spec_in_tb': self.spec_in_tb},
+                                               'spec_in_tb': self.spec_in_tb},
                                        max_nfev=max_nfev, nan_policy='omit')
                 emcee_params = mini.minimize(method='emcee', **emcee_kws)
                 print(lmfit.report_fit(emcee_params.params))
                 chain = emcee_params.flatchain
                 shape = chain.shape[0]
 
-                for n, key in enumerate(self.fit_params_res):
+
+                for n, key in enumerate(fit_params_res):
+                    if key=='lnf':
+                        continue
                     try:
                         self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
                     except KeyError:
@@ -2146,7 +2165,7 @@ class App(QMainWindow):
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
 
                 for i in range(burn, shape, thin):
-                    for n, key in enumerate(self.fit_params_res):
+                    for n, key in enumerate(fit_params_res):
                         try:
                             mi.params[key].value = chain[key][i]
                         except KeyError:

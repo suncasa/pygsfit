@@ -213,7 +213,7 @@ class GSCostFunctions:
 
         # calculating the emission for array distribution (array -> on)
         res = GET_MW(Lparms, Rparms, Parms, dummy, dummy, dummy, RL)
-        if res:
+        if True:
             # retrieving the results
             f = RL[0]
             I_L = RL[5]
