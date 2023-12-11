@@ -2078,8 +2078,8 @@ class App(QMainWindow):
         inv_sigma2 = 1.0 / (spec_err ** 2. + model ** 2 * np.exp(2 * lnf))
         num_freqs=freqs.size
         val=((residual_orig) ** 2 * inv_sigma2 - np.log(inv_sigma2))
-        #### lmfit expects an array. But these residuals will anyway be sqaured and summed up.
-        #### So I am passing an array of same numbers
+        #### lmfit expects an array. But these residuals will anyway be sqaured and summed up
+        #### after multiplying with -0.5. So I am passing an array of same numbers
         return val
         
     def do_spec_fit(self):
@@ -2159,7 +2159,6 @@ class App(QMainWindow):
                     if key=='lnf':
                         continue
                     try:
-                    #TODO
                         self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
                     except KeyError:
                         pass
