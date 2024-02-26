@@ -6,6 +6,22 @@ import os
 import pickle
 from regions import Regions, CRTFRegionParserError
 from PyQt5.QtGui import QDesktopServices
+import matplotlib.pyplot as plt
+from astropy.time import Time
+import sunpy
+from matplotlib import patches
+from matplotlib.backends.backend_qt5agg import FigureCanvas
+from astropy.coordinates import SkyCoord
+from matplotlib.figure import Figure
+from sunpy import map as smap
+import astropy.units as u
+from pyqtgraph import PolyLineROI
+from scipy import ndimage
+from scipy.spatial import ConvexHull
+from matplotlib.patches import Polygon, Rectangle
+from matplotlib.collections import LineCollection, QuadMesh
+from shapely.geometry import LineString, box, Point
+from .gstools import sfu2tb
 
 class LineSegmentROIX(pg.ROI):
     r"""
@@ -477,3 +493,412 @@ def add_new_group(self):
     self.add_to_roigroup_button.setText(self.add_to_roigroup_widget.currentItem().text())
     self.roigroup_selection_widget.setCurrentRow(self.roi_group_idx)
     self.roigroup_selection_button.setText(self.roigroup_selection_widget.currentItem().text())
+
+
+class Grid_Dialog(QDialog):
+    data_transmitted = pyqtSignal(object)
+    def __init__(self, parent=None, pygsfit_object=None):
+        super(Grid_Dialog, self).__init__(parent)
+        self.pygsfit_object = pygsfit_object
+        self.value_transmitted = False
+        self.contour_level = np.array([0.5])
+        self.cfreqs = self.pygsfit_object.cfreqs
+        self.calpha = 1.0
+        self.selected_indices = [0, 2, 5, 10, 20]
+        self.num_sides = 12
+        self.roi_group_idx = 0
+        self.groi_idx = 0
+        self.start_freq_idx = 2
+        self.end_freq_idx = 30
+        self.custom_factor = 6.e6
+        self.n_sources = 1
+        self.grid_size = 1
+        # Plot area
+        self.plot_scene = QGraphicsScene()
+        self.graphicsView = QGraphicsView()
+        self.graphicsView.setScene(self.plot_scene)
+        self.roi_canvas = FigureCanvas(Figure(figsize=(8, 7)))
+        self.ax = self.roi_canvas.figure.subplots()
+        self.plot_scene.addWidget(self.roi_canvas)
+        #self.plot_layout.addWidget(self.roi_canvas)
+        self.update_plot()
+    def setupUi(self, Dialog):
+        Dialog.setObjectName("Dialog")
+        Dialog.resize(893, 680)
+        self.buttonBox = QDialogButtonBox(Dialog)
+        self.buttonBox.setGeometry(QRect(530, 590, 341, 32))
+        self.buttonBox.setOrientation(Qt.Horizontal)
+        self.buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttonBox.setObjectName("buttonBox")
+        self.buttonBox.accepted.connect(self.on_confirm)
+        self.buttonBox.rejected.connect(Dialog.close)
+
+        self.graphicsView = QGraphicsView(Dialog)
+        self.graphicsView.setGeometry(QRect(20, 20, 631, 521))
+        self.graphicsView.setObjectName("graphicsView")
+        # Plot area
+        self.plot_scene = QGraphicsScene()
+        self.graphicsView.setScene(self.plot_scene)
+        self.roi_canvas = FigureCanvas(Figure(figsize=(6, 4)))
+        self.ax = self.roi_canvas.figure.subplots()
+        self.plot_scene.addWidget(self.roi_canvas)
+        self.update_plot()
+
+        self.pushButton = QPushButton(Dialog)
+        self.pushButton.setGeometry(QRect(160, 590, 91, 32))
+        self.pushButton.setObjectName("pushButton")
+        self.pushButton.clicked.connect(self.create_polygon_rois)
+
+
+        self.horizontalSlider = QSlider(Dialog)
+        self.horizontalSlider.setGeometry(QRect(730, 40, 111, 20))
+        self.horizontalSlider.setOrientation(Qt.Horizontal)
+        self.horizontalSlider.setObjectName("horizontalSlider")
+        self.horizontalSlider.setMinimum(2)
+        self.horizontalSlider.setMaximum(99)
+        self.horizontalSlider.setValue(50)
+        self.horizontalSlider.valueChanged.connect(self.update_plot)
+
+
+        self.spinBox = QSpinBox(Dialog)
+        self.spinBox.setGeometry(QRect(740, 470, 42, 22))
+        self.spinBox.setObjectName("spinBox")
+        self.spinBox.setValue(self.num_sides)
+
+        self.spinBox_2 = QSpinBox(Dialog)
+        self.spinBox_2.setGeometry(QRect(800, 470, 42, 22))
+        self.spinBox_2.setObjectName("spinBox_2")
+        self.spinBox_2.setValue(self.n_sources)
+        self.label = QLabel(Dialog)
+        self.label.setGeometry(QRect(730, 450, 60, 16))
+        self.label.setObjectName("label")
+
+        self.label_2 = QLabel(Dialog)
+        self.label_2.setGeometry(QRect(790, 450, 60, 16))
+        self.label_2.setObjectName("label_2")
+        self.spinBox_3 = QSpinBox(Dialog)
+        self.spinBox_3.setGeometry(QRect(740, 320, 42, 22))
+        self.spinBox_3.setObjectName("spinBox_3")
+        self.spinBox_3.setValue(self.roi_group_idx)
+        self.spinBox_4 = QSpinBox(Dialog)
+        self.spinBox_4.setGeometry(QRect(790, 320, 42, 22))
+        self.spinBox_4.setObjectName("spinBox_4")
+        self.spinBox_4.setValue(self.groi_idx)
+        self.label_3 = QLabel(Dialog)
+        self.label_3.setGeometry(QRect(730, 300, 60, 16))
+        self.label_3.setObjectName("label_3")
+        self.label_4 = QLabel(Dialog)
+        self.label_4.setGeometry(QRect(800, 300, 60, 16))
+        self.label_4.setObjectName("label_4")
+        self.spinBox_5 = QSpinBox(Dialog)
+        self.spinBox_5.setGeometry(QRect(740, 420, 42, 22))
+        self.spinBox_5.setObjectName("spinBox_5")
+        self.spinBox_5.setValue(self.start_freq_idx)
+        self.spinBox_5.valueChanged.connect(self.update_plot)
+
+        self.checkbox_u = QCheckBox('CustThresh:', Dialog)
+        self.checkbox_u.setGeometry(QRect(690, 100, 100, 16))
+        self.checkbox_u.setObjectName("CustThresh")
+        self.checkbox_u.setChecked(False)
+
+        self.lineEdit_u = QLineEdit(Dialog)
+        self.lineEdit_u.setGeometry(QRect(690, 130, 110, 21))
+        self.lineEdit_u.setObjectName("lineEdit_u")
+        self.lineEdit_u.setText(str(self.custom_factor))
+
+        self.combo_box_u = QComboBox(Dialog)
+        self.combo_box_u.setGeometry(QRect(810, 130, 62, 21))
+        self.combo_box_u.setObjectName("combo_box_u")
+        self.combo_box_u.addItem('K')
+        self.combo_box_u.addItem('sfu')
+        self.combo_box_u.addItem('RMS')
+        self.combo_box_u.setCurrentIndex(0)
+
+        self.spinBox_6 = QSpinBox(Dialog)
+        self.spinBox_6.setGeometry(QRect(800, 420, 42, 22))
+        self.spinBox_6.setObjectName("spinBox_6")
+        self.spinBox_6.setValue(self.end_freq_idx)
+        self.spinBox_6.valueChanged.connect(self.update_plot)
+
+        self.label_5 = QLabel(Dialog)
+        self.label_5.setGeometry(QRect(730, 400, 60, 16))
+        self.label_5.setObjectName("label_5")
+        self.label_6 = QLabel(Dialog)
+        self.label_6.setGeometry(QRect(800, 400, 60, 16))
+        self.label_6.setObjectName("label_6")
+
+        self.label_7 = QLabel(Dialog)
+        self.label_7.setGeometry(QRect(700, 20, 150, 20))
+        self.label_7.setObjectName("label_7")
+
+
+        self.pushButton_2 = QPushButton(Dialog)
+        self.pushButton_2.setGeometry(QRect(50, 590, 100, 32))
+        self.pushButton_2.setObjectName("pushButton_2")
+        self.pushButton_2.clicked.connect(self.draw_existing_roi)
+
+
+        self.label_grid_unit = QLabel(Dialog)
+        self.label_grid_unit.setGeometry(QRect(810, 180, 61, 31))
+        self.label_grid_unit.setObjectName("label_grid_unit")
+
+        self.pushButton_3 = QPushButton(Dialog)
+        self.pushButton_3.setGeometry(QRect(740, 245, 100, 30))
+        self.pushButton_3.setObjectName("pushButton_3")
+        self.pushButton_3.clicked.connect(self.grid_plot)
+
+        self.horizontalSlider_2 = QSlider(Dialog)
+        self.horizontalSlider_2.setGeometry(QRect(740, 210, 111, 20))
+        self.horizontalSlider_2.setOrientation(Qt.Horizontal)
+        self.horizontalSlider_2.setObjectName("horizontalSlider_2")
+        self.horizontalSlider_2.setValue(self.grid_size)
+        self.horizontalSlider_2.valueChanged.connect(self.update_grid_size)
+
+        self.label_grid_size = QLabel(Dialog)
+        self.label_grid_size.setGeometry(QRect(670, 180, 70, 20))
+        self.label_grid_size.setObjectName("label_grid_size")
+        self.lcdNumber = QLCDNumber(Dialog)
+        self.lcdNumber.setGeometry(QRect(740, 180, 64, 23))
+        self.lcdNumber.setObjectName("lcdNumber")
+        self.lcdNumber.setStyleSheet("QLCDNumber { background-color: grey; color: green; }")
+        self.lcdNumber.display(self.grid_size)
+        self.retranslateUi(Dialog)
+        QMetaObject.connectSlotsByName(Dialog)
+
+    def retranslateUi(self, Dialog):
+        _translate = QCoreApplication.translate
+        Dialog.setWindowTitle(_translate("Dialog", "Dialog"))
+        self.pushButton.setText(_translate("Dialog", "Auto Mask"))
+        self.label.setText(_translate("Dialog", "nSides"))
+        self.label_2.setText(_translate("Dialog", "nSource"))
+        self.label_3.setText(_translate("Dialog", "roiGroup"))
+        self.label_4.setText(_translate("Dialog", "roi"))
+        self.label_5.setText(_translate("Dialog", "fStart"))
+        self.label_6.setText(_translate("Dialog", "fEnd"))
+        self.label_7.setText(_translate("Dialog", "contour level"))
+        self.label_grid_size.setText(_translate("Dialog", "Grid Size:"))
+        self.label_grid_unit.setText(_translate("Dialog", "Pix"))
+        #self.label_8.setText(_translate("Dialog", "RMS factor"))
+        #self.label_check.setText(_translate("Dialog", "use rms"))
+        self.pushButton_2.setText(_translate("Dialog", "Existing Roi"))
+        self.pushButton_3.setText(_translate("Dialog", "Grid"))
+
+
+    def update_plot(self):
+        try:
+            self.contour_level = np.array([self.horizontalSlider.value() / 100.0])
+            self.label_7.setText("contour level:{0}%".format(self.horizontalSlider.value()))
+            self.start_freq_idx = self.spinBox_5.value()
+            self.end_freq_idx = self.spinBox_6.value()
+        except:
+            pass
+        for collection in self.ax.collections:
+            #if isinstance(collection, LineCollection) or isinstance(collection, QuadMesh):
+            if isinstance(collection, LineCollection):
+                    collection.remove()
+        # for artist in self.ax.lines + self.ax.collections + self.ax.images:
+        #     print('artist', artist)
+        #     artist.remove()
+        self.selected_indices = np.linspace(self.start_freq_idx, self.end_freq_idx, num=5, endpoint=True).astype(int)
+        if self.pygsfit_object.has_eovsamap:
+            nspw = self.pygsfit_object.meta['nfreq']
+            self.pygsfit_object.eoimg_date = eoimg_date = Time(self.pygsfit_object.meta['refmap'].date.mjd +
+                                                self.pygsfit_object.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
+            eotimestr = eoimg_date.isot[:-4]
+            icmap = plt.get_cmap('RdYlBu')
+
+            self.roi_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
+        else:
+            self.statusBar.showMessage('EOVSA FITS file does not exist', 2000)
+            self.eoimg_fname = '<Select or enter a valid fits filename>'
+            # self.eoimg_fitsentry.setText(self.eoimg_fname)
+            # self.infoEdit.setPlainText('')
+        cts=[]
+        pos = self.ax.get_position()
+        self.roi_canvas.figure.delaxes(self.ax)
+        self.ax = self.roi_canvas.figure.add_axes(pos, projection=self.pygsfit_object.meta['refmap'])
+        for s, sp in enumerate(self.selected_indices):
+            cdata = self.pygsfit_object.data[self.pygsfit_object.pol_select_idx, self.pygsfit_object.cur_frame_idx, sp, ...]
+            cur_sunmap = smap.Map(cdata, self.pygsfit_object.meta['refmap'].meta)
+            clvls = self.contour_level * np.nanmax(cdata) * u.K
+            rcmap = [icmap(self.pygsfit_object.freq_dist(self.pygsfit_object.cfreqs[sp]))] * len(clvls)
+            cts.append(cur_sunmap.draw_contours(clvls, axes=self.ax, colors=rcmap, alpha=self.calpha))
+
+        self.ax.set_xlabel('Solar X [arcsec]')
+        self.ax.set_ylabel('Solar Y [arcsec]')
+        self.ax.set_aspect('equal')
+        self.roi_canvas.draw()
+
+    def create_polygon_rois(self):
+        for artist in self.ax.patches:
+            artist.remove()
+        cdata = self.pygsfit_object.data
+        self.start_freq_idx = self.spinBox_5.value()
+        self.end_freq_idx = self.spinBox_6.value()
+        images = cdata[0,self.pygsfit_object.cur_frame_idx, self.start_freq_idx:self.end_freq_idx, ...]
+        rms = self.pygsfit_object.bkg_roi.tb_rms[self.start_freq_idx:self.end_freq_idx]
+        self.custom_factor = float(self.lineEdit_u.text())
+        self.n_sources = self.spinBox_2.value()
+        self.num_sides = self.spinBox.value()
+        combined_thresholded = np.zeros_like(images[0], dtype=bool)
+
+        for i_idx, image in enumerate(images):
+            if self.checkbox_u.isChecked() == True:
+                if self.combo_box_u.currentText() == 'K':
+                    threshold = self.custom_factor
+                elif self.combo_box_u.currentText() == 'sfu':
+                    threshold = sfu2tb(self.pygsfit_object.cfreqs[i_idx+self.start_freq_idx] * 1e9 * u.Hz, self.custom_factor * u.jansky * 1e4,
+                                              area=self.pygsfit_object.dx * self.pygsfit_object.dy * u.arcsec ** 2, reverse=False).value
+                elif self.combo_box_u.currentText() == 'RMS':
+                    threshold = rms[i_idx] * self.custom_factor
+            else:
+                threshold = np.max(image) * self.contour_level[0]
+            thresholded_image = image > threshold
+            combined_thresholded |= thresholded_image
+        #plt.imshow(combined_thresholded, cmap='viridis', interpolation='nearest',origin='lower')
+        #plt.show()
+        self.labeled_image, self.num_features = ndimage.label(combined_thresholded)
+        region_sizes = [(i, np.sum(self.labeled_image == i)) for i in range(1, self.num_features + 1)]
+        region_sizes.sort(key=lambda x: x[1], reverse=True)
+        self.auto_rois_points = []
+        if not hasattr(self,'all_poly'):
+            self.all_poly = []
+        for ridx_, (region_index, _) in enumerate(region_sizes[:self.n_sources]):
+            positions = np.argwhere(self.labeled_image == region_index)
+            if positions.size == 0:
+                continue
+            self.create_polygon_from_points(positions)
+
+            cur_poly = Polygon([[px, py] for px, py in self.poly_points], closed=True, color='blue', alpha=0.5)
+            #cur_roi = PolyLineROI([self.pix_to_world(px, py) for px, py in self.poly_points], closed=True)
+            self.auto_rois_points.append([self.pix_to_world(px, py) for px, py in self.poly_points])
+            self.ax.add_patch(cur_poly)
+            self.all_poly.append(cur_poly)
+
+            if ridx_+1 == self.n_sources:
+                break
+        self.roi_canvas.draw()
+    def draw_existing_roi(self):
+        ##todo add existing ROI to the plot
+        pg_roi = self.pygsfit_object.rois[self.spinBox_3.value()][self.spinBox_4.value()]
+        if not hasattr(self, 'all_poly'):
+            self.all_poly = []
+        if isinstance(pg_roi, pg.RectROI):
+            x,y = convert_roi_pos_to_pixels(pg_roi, self.pygsfit_object.meta['refmap'])
+            width, height = calculate_roi_size_in_pixels(pg_roi, (self.pygsfit_object.meta['refmap'].meta['CDELT1'], self.pygsfit_object.meta['refmap'].meta['CDELT2']))
+            self.poly_points = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+        elif isinstance(pg_roi, pg.PolyLineROI):
+            self.poly_points = convert_roi_pos_to_pixels(pg_roi, self.pygsfit_object.meta['refmap'])
+        else:
+            raise ValueError("Unsupported ROI type")
+        print(self.poly_points)
+        cur_poly = Polygon([[px, py] for px, py in self.poly_points], closed=True, color='blue', alpha=0.5)
+        #cur_roi = PolyLineROI([self.pix_to_world(px, py) for px, py in self.poly_points], closed=True)
+        self.ax.add_patch(cur_poly)
+        self.all_poly.append(cur_poly)
+        self.roi_canvas.draw()
+    def create_polygon_from_points(self, points):
+        hull = ConvexHull(points)
+        hull_points = points[hull.vertices]
+        if len(hull_points) > self.num_sides:
+            indices = np.round(np.linspace(0, len(hull_points) - 1, num=self.num_sides)).astype(int)
+            hull_points = hull_points[indices]
+        self.poly_points = [sub[::-1] for sub in hull_points.tolist()]
+
+    def grid_plot(self):
+        #self.grid_size = self.horizontalSlider_2.value()
+        min_x = min_y = np.inf
+        max_x = max_y = -np.inf
+        for polygon_points in self.all_poly:
+            current_min_x, current_min_y = np.min(polygon_points.get_xy(), axis=0)
+            current_max_x, current_max_y = np.max(polygon_points.get_xy(), axis=0)
+            min_x = min(min_x, current_min_x)
+            min_y = min(min_y, current_min_y)
+            max_x = max(max_x, current_max_x)
+            max_y = max(max_y, current_max_y)
+        margin = 10
+        self.update_plot()
+        #self.create_polygon_rois()
+        #self.
+        self.ax.set_xlim(min_x - margin, max_x + margin)
+        self.ax.set_ylim(min_y - margin, max_y + margin)
+
+        def is_cube_vertex_in_polygon(cube_vertices, polygon_vertices):
+            polygon = Polygon(polygon_vertices)
+            for iv, vertex in enumerate(cube_vertices):
+                point = Point(vertex)
+                is_inside = polygon.contains(point)
+                if is_inside[0]:
+                    return True
+            return False
+
+        self.grid_rois_centers = []
+        self.grid_pixels = []
+        for polygon_points in self.all_poly:
+            poly_vertices = polygon_points.get_xy()
+            min_x = int(min(vertex[0] for vertex in poly_vertices))
+            max_x = int(max(vertex[0] for vertex in poly_vertices))
+            min_y = int(min(vertex[1] for vertex in poly_vertices))
+            max_y = int(max(vertex[1] for vertex in poly_vertices))
+            intersected_cubes = set()
+            for x in range(min_x, max_x, self.grid_size):
+                for y in range(min_y, max_y, self.grid_size):
+                    cube_vertices = [(x, y), (x + self.grid_size, y), (x, y + self.grid_size), (x + self.grid_size, y + self.grid_size)]
+                    if is_cube_vertex_in_polygon(cube_vertices, poly_vertices):
+                        intersected_cubes.add((x, y))
+            grid_size_world = (self.grid_size * self.pygsfit_object.meta['refmap'].meta['CDELT1'],self.grid_size * self.pygsfit_object.meta['refmap'].meta['CDELT2'])
+            for (x, y) in sorted(intersected_cubes, key=lambda element: (element[0], element[1])):
+                rect = patches.Rectangle((x, y), self.grid_size, self.grid_size, linewidth=0.5, edgecolor='k', facecolor='none')
+                world_xy = self.pix_to_world(x,y)
+                self.grid_rois_centers.append(([a+b/2.0 for a,b in zip(world_xy, grid_size_world)],grid_size_world))
+                self.grid_pixels.append(((x,y),self.grid_size))
+                self.ax.add_patch(rect)
+        self.roi_canvas.draw()
+
+    def pix_to_world(self,px, py):
+        pixel_coord_u = u.Quantity([px, py], u.pix)
+        world_coord = self.pygsfit_object.meta['refmap'].pixel_to_world(pixel_coord_u[0], pixel_coord_u[1])
+        return [world_coord.Tx.value, world_coord.Ty.value]
+
+
+    def patch_to_pyRoi(self):
+        pass
+
+    def update_slider_label(self, value):
+        self.horizontalSlider_label.setText(f"{value}%")
+    def update_grid_size(self):
+        self.grid_size = self.horizontalSlider_2.value()
+        self.lcdNumber.display(self.grid_size)
+    def on_confirm(self):
+        value = (self.grid_rois_centers,  self.grid_pixels)
+        if hasattr(self, 'auto_rois_points'):
+            value += (self.auto_rois_points,)
+        self.data_transmitted.emit(value)
+        self.value_transmitted = True
+        self.close()
+
+    def closeEvent(self, event):
+        if not self.value_transmitted:
+            QMessageBox.warning(self, "Warning", "No data transmitted!")
+        event.accept()
+
+def convert_roi_pos_to_pixels(roi, ref_map):
+    if isinstance(roi, pg.RectROI):
+        world = roi.pos()
+        coor = SkyCoord(world[0] * u.arcsec, world[1] * u.arcsec, frame=ref_map.coordinate_frame)
+        pix_coor = ref_map.world_to_pixel(coor)
+        return int(pix_coor.x.value), int(pix_coor.y.value)
+    elif isinstance(roi, pg.PolyLineROI):
+        pix_res = []
+        for world in roi.positions:
+            coor = SkyCoord(world[0] * u.arcsec, world[1] * u.arcsec, frame=ref_map.coordinate_frame)
+            pix_coor = ref_map.world_to_pixel(coor)
+            pix_res.append((int(pix_coor.x.value), int(pix_coor.y.value)))
+        return pix_res
+    else:
+        print('only rect and ploy supported!')
+
+# Function to calculate ROI size in pixels
+def calculate_roi_size_in_pixels(roi, arcsec_per_pixel):
+    size = roi.size()
+    return int(size[0] / arcsec_per_pixel[0]), int(size[1] / arcsec_per_pixel[1])
