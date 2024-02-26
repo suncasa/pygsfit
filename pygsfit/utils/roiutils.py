@@ -11,6 +11,7 @@ from astropy.time import Time
 import sunpy
 from matplotlib import patches
 from matplotlib.backends.backend_qt5agg import FigureCanvas
+from astropy.coordinates import SkyCoord
 from matplotlib.figure import Figure
 from sunpy import map as smap
 import astropy.units as u
@@ -505,11 +506,13 @@ class Grid_Dialog(QDialog):
         self.calpha = 1.0
         self.selected_indices = [0, 2, 5, 10, 20]
         self.num_sides = 12
+        self.roi_group_idx = 0
+        self.groi_idx = 0
         self.start_freq_idx = 2
         self.end_freq_idx = 30
         self.custom_factor = 6.e6
         self.n_sources = 1
-        self.grid_size = 2
+        self.grid_size = 1
         # Plot area
         self.plot_scene = QGraphicsScene()
         self.graphicsView = QGraphicsView()
@@ -576,9 +579,11 @@ class Grid_Dialog(QDialog):
         self.spinBox_3 = QSpinBox(Dialog)
         self.spinBox_3.setGeometry(QRect(740, 320, 42, 22))
         self.spinBox_3.setObjectName("spinBox_3")
+        self.spinBox_3.setValue(self.roi_group_idx)
         self.spinBox_4 = QSpinBox(Dialog)
         self.spinBox_4.setGeometry(QRect(790, 320, 42, 22))
         self.spinBox_4.setObjectName("spinBox_4")
+        self.spinBox_4.setValue(self.groi_idx)
         self.label_3 = QLabel(Dialog)
         self.label_3.setGeometry(QRect(730, 300, 60, 16))
         self.label_3.setObjectName("label_3")
@@ -628,14 +633,17 @@ class Grid_Dialog(QDialog):
 
 
         self.pushButton_2 = QPushButton(Dialog)
-        self.pushButton_2.setGeometry(QRect(70, 590, 81, 32))
+        self.pushButton_2.setGeometry(QRect(50, 590, 100, 32))
         self.pushButton_2.setObjectName("pushButton_2")
         self.pushButton_2.clicked.connect(self.draw_existing_roi)
 
 
+        self.label_grid_unit = QLabel(Dialog)
+        self.label_grid_unit.setGeometry(QRect(810, 180, 61, 31))
+        self.label_grid_unit.setObjectName("label_grid_unit")
 
         self.pushButton_3 = QPushButton(Dialog)
-        self.pushButton_3.setGeometry(QRect(810, 180, 61, 31))
+        self.pushButton_3.setGeometry(QRect(740, 245, 100, 30))
         self.pushButton_3.setObjectName("pushButton_3")
         self.pushButton_3.clicked.connect(self.grid_plot)
 
@@ -669,9 +677,10 @@ class Grid_Dialog(QDialog):
         self.label_6.setText(_translate("Dialog", "fEnd"))
         self.label_7.setText(_translate("Dialog", "contour level"))
         self.label_grid_size.setText(_translate("Dialog", "Grid Size:"))
+        self.label_grid_unit.setText(_translate("Dialog", "Pix"))
         #self.label_8.setText(_translate("Dialog", "RMS factor"))
         #self.label_check.setText(_translate("Dialog", "use rms"))
-        self.pushButton_2.setText(_translate("Dialog", "Exist Roi"))
+        self.pushButton_2.setText(_translate("Dialog", "Existing Roi"))
         self.pushButton_3.setText(_translate("Dialog", "Grid"))
 
 
@@ -709,7 +718,7 @@ class Grid_Dialog(QDialog):
         self.roi_canvas.figure.delaxes(self.ax)
         self.ax = self.roi_canvas.figure.add_axes(pos, projection=self.pygsfit_object.meta['refmap'])
         for s, sp in enumerate(self.selected_indices):
-            cdata = self.pygsfit_object.data[self.pygsfit_object.pol_select_idx, sp, ...]
+            cdata = self.pygsfit_object.data[self.pygsfit_object.pol_select_idx, self.pygsfit_object.cur_frame_idx, sp, ...]
             cur_sunmap = smap.Map(cdata, self.pygsfit_object.meta['refmap'].meta)
             clvls = self.contour_level * np.nanmax(cdata) * u.K
             rcmap = [icmap(self.pygsfit_object.freq_dist(self.pygsfit_object.cfreqs[sp]))] * len(clvls)
@@ -726,7 +735,7 @@ class Grid_Dialog(QDialog):
         cdata = self.pygsfit_object.data
         self.start_freq_idx = self.spinBox_5.value()
         self.end_freq_idx = self.spinBox_6.value()
-        images = cdata[0, self.start_freq_idx:self.end_freq_idx, ...]
+        images = cdata[0,self.pygsfit_object.cur_frame_idx, self.start_freq_idx:self.end_freq_idx, ...]
         rms = self.pygsfit_object.bkg_roi.tb_rms[self.start_freq_idx:self.end_freq_idx]
         self.custom_factor = float(self.lineEdit_u.text())
         self.n_sources = self.spinBox_2.value()
@@ -752,7 +761,8 @@ class Grid_Dialog(QDialog):
         region_sizes = [(i, np.sum(self.labeled_image == i)) for i in range(1, self.num_features + 1)]
         region_sizes.sort(key=lambda x: x[1], reverse=True)
         self.auto_rois_points = []
-        self.all_poly = []
+        if not hasattr(self,'all_poly'):
+            self.all_poly = []
         for ridx_, (region_index, _) in enumerate(region_sizes[:self.n_sources]):
             positions = np.argwhere(self.labeled_image == region_index)
             if positions.size == 0:
@@ -770,17 +780,23 @@ class Grid_Dialog(QDialog):
         self.roi_canvas.draw()
     def draw_existing_roi(self):
         ##todo add existing ROI to the plot
-        try:
-            pg_roi = self.pygsfit_object.rois[0][0]
-            roi_pos = pg_roi.pos()
-            roi_size = pg_roi.size()
-            roi_pos = (roi_pos.x(), roi_pos.y())
-            roi_size = (roi_size.x(), roi_size.y())
-            rect_patch = Rectangle(roi_pos, *roi_size, edgecolor='r', facecolor='none')
-            self.ax.add_patch(rect_patch)
-            self.roi_canvas.draw()
-        except:
-            print('Code is not ready yet, sorry.')
+        pg_roi = self.pygsfit_object.rois[self.spinBox_3.value()][self.spinBox_4.value()]
+        if not hasattr(self, 'all_poly'):
+            self.all_poly = []
+        if isinstance(pg_roi, pg.RectROI):
+            x,y = convert_roi_pos_to_pixels(pg_roi, self.pygsfit_object.meta['refmap'])
+            width, height = calculate_roi_size_in_pixels(pg_roi, (self.pygsfit_object.meta['refmap'].meta['CDELT1'], self.pygsfit_object.meta['refmap'].meta['CDELT2']))
+            self.poly_points = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+        elif isinstance(pg_roi, pg.PolyLineROI):
+            self.poly_points = convert_roi_pos_to_pixels(pg_roi, self.pygsfit_object.meta['refmap'])
+        else:
+            raise ValueError("Unsupported ROI type")
+        print(self.poly_points)
+        cur_poly = Polygon([[px, py] for px, py in self.poly_points], closed=True, color='blue', alpha=0.5)
+        #cur_roi = PolyLineROI([self.pix_to_world(px, py) for px, py in self.poly_points], closed=True)
+        self.ax.add_patch(cur_poly)
+        self.all_poly.append(cur_poly)
+        self.roi_canvas.draw()
     def create_polygon_from_points(self, points):
         hull = ConvexHull(points)
         hull_points = points[hull.vertices]
@@ -802,7 +818,7 @@ class Grid_Dialog(QDialog):
             max_y = max(max_y, current_max_y)
         margin = 10
         self.update_plot()
-        self.create_polygon_rois()
+        #self.create_polygon_rois()
         #self.
         self.ax.set_xlim(min_x - margin, max_x + margin)
         self.ax.set_ylim(min_y - margin, max_y + margin)
@@ -817,6 +833,7 @@ class Grid_Dialog(QDialog):
             return False
 
         self.grid_rois_centers = []
+        self.grid_pixels = []
         for polygon_points in self.all_poly:
             poly_vertices = polygon_points.get_xy()
             min_x = int(min(vertex[0] for vertex in poly_vertices))
@@ -834,6 +851,7 @@ class Grid_Dialog(QDialog):
                 rect = patches.Rectangle((x, y), self.grid_size, self.grid_size, linewidth=0.5, edgecolor='k', facecolor='none')
                 world_xy = self.pix_to_world(x,y)
                 self.grid_rois_centers.append(([a+b/2.0 for a,b in zip(world_xy, grid_size_world)],grid_size_world))
+                self.grid_pixels.append(((x,y),self.grid_size))
                 self.ax.add_patch(rect)
         self.roi_canvas.draw()
 
@@ -841,6 +859,7 @@ class Grid_Dialog(QDialog):
         pixel_coord_u = u.Quantity([px, py], u.pix)
         world_coord = self.pygsfit_object.meta['refmap'].pixel_to_world(pixel_coord_u[0], pixel_coord_u[1])
         return [world_coord.Tx.value, world_coord.Ty.value]
+
 
     def patch_to_pyRoi(self):
         pass
@@ -851,7 +870,9 @@ class Grid_Dialog(QDialog):
         self.grid_size = self.horizontalSlider_2.value()
         self.lcdNumber.display(self.grid_size)
     def on_confirm(self):
-        value = (self.grid_rois_centers, self.auto_rois_points)
+        value = (self.grid_rois_centers,  self.grid_pixels)
+        if hasattr(self, 'auto_rois_points'):
+            value += (self.auto_rois_points,)
         self.data_transmitted.emit(value)
         self.value_transmitted = True
         self.close()
@@ -860,3 +881,24 @@ class Grid_Dialog(QDialog):
         if not self.value_transmitted:
             QMessageBox.warning(self, "Warning", "No data transmitted!")
         event.accept()
+
+def convert_roi_pos_to_pixels(roi, ref_map):
+    if isinstance(roi, pg.RectROI):
+        world = roi.pos()
+        coor = SkyCoord(world[0] * u.arcsec, world[1] * u.arcsec, frame=ref_map.coordinate_frame)
+        pix_coor = ref_map.world_to_pixel(coor)
+        return int(pix_coor.x.value), int(pix_coor.y.value)
+    elif isinstance(roi, pg.PolyLineROI):
+        pix_res = []
+        for world in roi.positions:
+            coor = SkyCoord(world[0] * u.arcsec, world[1] * u.arcsec, frame=ref_map.coordinate_frame)
+            pix_coor = ref_map.world_to_pixel(coor)
+            pix_res.append((int(pix_coor.x.value), int(pix_coor.y.value)))
+        return pix_res
+    else:
+        print('only rect and ploy supported!')
+
+# Function to calculate ROI size in pixels
+def calculate_roi_size_in_pixels(roi, arcsec_per_pixel):
+    size = roi.size()
+    return int(size[0] / arcsec_per_pixel[0]), int(size[1] / arcsec_per_pixel[1])

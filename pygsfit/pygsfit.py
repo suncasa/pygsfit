@@ -15,19 +15,29 @@ from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 from astropy import wcs
 from astropy.io import fits
-from astropy.time import Time
+from astropy.time import Time, TimeDelta
 from matplotlib import patches
 from matplotlib.backends.backend_qt5agg import FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from sunpy import map as smap
 import h5py
-from utils import ndfits
+import threading
+from tqdm import *
+import multiprocessing
+import tempfile
+import glob
+import re
+import time
+from astropy.coordinates import SkyCoord
+import datetime
+import dill
+
 
 filedir = os.path.dirname(os.path.realpath(__file__))
 print(filedir)
 sys.path.append(filedir)
-from utils import gstools, roiutils
+from utils import gstools, roiutils, ndfits
 from utils.roiutils import PolyLineROIX, Grid_Dialog
 import warnings
 
@@ -61,13 +71,15 @@ fit_param_text = {'Bx100G': 'B [\u00d7100 G]',
 
 
 class App(QMainWindow):
-
     def __init__(self):
         super().__init__()
 
         self.eoimg_fname = '<Select or enter a valid EOVSA image fits file name>'
         self.eodspec_fname = '<Select or enter a valid EOVSA spectrogram fits file name>'
         self.aiafname = '<Select or enter a valid AIA fits file name>'
+        self.eoimg_time_seq = None
+        self.cur_frame_idx = 0
+        self.data_in_seq = False
         # self.eoimg_fitsentry = QLineEdit()
         # self.eodspec_fitsentry = QLineEdit()
         self.title = 'pygsfit'
@@ -94,6 +106,7 @@ class App(QMainWindow):
         self.fit_kws = {'maxiter': 2000, 'xatol': 0.01, 'fatol': 0.01}
         self.fit_function = gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc
         self.threadpool = QThreadPool()
+        self.fit_threads = []
         self.has_eovsamap = False
         self.has_dspec = False
         self.has_stokes = False
@@ -111,6 +124,7 @@ class App(QMainWindow):
         self.spec_rmsplots = []
         self.spec_dataplots = []
         self.spec_dataplots_tofit = []
+        self.ele_dist = 'powerlaw'
         self.roi_grid_size = 2
         self.rois = [[]]
         self.grid_rois = []
@@ -125,20 +139,26 @@ class App(QMainWindow):
         self.is_calibrated_tp = True
         self.qlookimg_axs = None
         self.qlookdspec_ax = None
+        #for signal slots:
+        #self.update_roi_index.connect(self.set_roi_index)
         # some controls for qlookplot
         self.opencontour = True
         self.clevels = np.array([0.7])
         self.calpha = 1.
         self.pgcmap = self._create_pgcmap(cmap='viridis', ncolorstop=6)
         self.savedata = False  ### Surajit edit
+        self.update_gui = True
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.check_tasks_completion)
+        self.timer.setInterval(2000)
         # initialize the window
         # self.initUI()
         self.initUItab_explorer()
         # ## quick input for debug --------------
         # self.eoimg_file_select()
         # ## quick input for debug --------------
-        self.eoimg_fname = '/Users/walterwei/Downloads/20220511/slf_final_XX_t19_allbd.fits'
-        self.eoimg_file_select_return()
+        #self.eoimg_fname = '/Users/walterwei/Downloads/20220511/slf_final_XX_t19_allbd.fits'
+        #self.eoimg_file_select_return()
 
     def _create_pgcmap(self, cmap='viridis', ncolorstop=6):
         """This is to create the cmap for pyqtgraph's ImageView Widgets"""
@@ -276,6 +296,9 @@ class App(QMainWindow):
         action_loadEOVSAspectrogram = QAction("Load EOVSA Spectrogram", self)
         action_loadEOVSAspectrogram.triggered.connect(self.eodspec_file_select)
         actionFile.addAction(action_loadEOVSAspectrogram)
+        action_exportBatchScript = QAction("Export Batch Script", self)
+        action_exportBatchScript.triggered.connect(self.export_batch_script)
+        actionFile.addAction(action_exportBatchScript)
         # actionFile.addAction("Open AIA")
         # actionFile.addAction("Open EOVSA Spectrogram")
         actionFile.addSeparator()
@@ -358,13 +381,38 @@ class App(QMainWindow):
         # Add plotting area for multi-panel EOVSA images
         self.pg_img_plot = pg.PlotItem(labels={'bottom': ('Solar X [arcsec]', ''), 'left': ('Solar Y [arcsec]', '')})
         self.pg_img_canvas = pg.ImageView(name='EOVSA Explorer', view=self.pg_img_plot)
+        #self.pg_img_canvas_wrapper = CustomImageViewer(wrapped_image_view = self.pg_img_canvas)
 
         pgimgbox.addWidget(self.pg_img_canvas)
+        #pgimgbox.addWidget(self.pg_img_canvas_wrapper)
         # pgimgbox.addLayout(pgbuttonbox)
         pgimgbox.addLayout(pg_img_status_box)
         data_layout_lowerbox.addLayout(pgimgbox, 0, 0)
         data_layout_lowerbox.setColumnStretch(0, 2)
         self.pg_img_canvas.sigTimeChanged.connect(self.update_fbar)
+
+        # Add eoimg seq selection slider (will only show up when more SIMILAR fits files are detect)
+        eoimg_seq_slider_label_layout = QHBoxLayout()
+        self.eoimg_seq_slider = QSlider(Qt.Horizontal)
+        eoimg_seq_slider_label_layout.addWidget(self.eoimg_seq_slider)  # Add the slider to the horizontal layout
+        self.eoimg_seq_label = QLabel("Time: ")
+        eoimg_seq_slider_label_layout.addWidget(self.eoimg_seq_label)  # Add the label to the horizontal layout
+        self.eoimg_seq_slider_label_widget = QWidget()
+        self.eoimg_seq_slider_label_widget.setLayout(eoimg_seq_slider_label_layout)
+        self.eoimg_seq_slider.setMinimum(0)
+        self.eoimg_seq_slider.setMaximum(1)
+        self.eoimg_seq_slider.setTickPosition(QSlider.TicksBelow)
+        self.eoimg_seq_slider.setValue(0)
+        self.eoimg_seq_slider_label_widget.setVisible(False)  # Initially hide the widget
+        self.eoimg_seq_slider.valueChanged.connect(self.time_slider_slided)
+        self.eoimg_seq_slider.sliderReleased.connect(self.time_slider_released)
+        pgimgbox.insertWidget(0, self.eoimg_seq_slider_label_widget)
+
+        #Display the selectde time
+        self.text_box_time = QLabel()
+        self.text_box_time.setText('')
+        eoimg_seq_slider_label_layout.addWidget(self.text_box_time)
+
 
         # right box for spectral plots
         self.specplotarea = QVBoxLayout()
@@ -521,7 +569,17 @@ class App(QMainWindow):
         self.add_roi_grid_button.setStyleSheet("background-color : lightgrey")
         roi_grid_box.addWidget(self.add_roi_grid_button)
         self.add_roi_grid_button.clicked.connect(self.open_grid_window)
+        # Create a QLabel for the spinbox
+        ncpu_label = QLabel("nThreads")
+        roi_grid_box.addWidget(ncpu_label)  # Add label to the layout
 
+        # Create a QSpinBox
+        self.ncpu_spinbox = QSpinBox()
+        self.ncpu_spinbox.setMinimum(1)  # Assuming you want to set a minimum value
+        self.ncpu_spinbox.setMaximum(48)  # And a maximum value
+        self.ncpu_spinbox.setRange(1, 48)
+        self.ncpu_spinbox.setValue(multiprocessing.cpu_count()-2)
+        roi_grid_box.addWidget(self.ncpu_spinbox)
         # self.roi_grid_size_selector = QSpinBox()
         # self.roi_grid_size_selector.setRange(1, 1000)
         # self.roi_grid_size_selector.setSingleStep(1)
@@ -530,6 +588,8 @@ class App(QMainWindow):
         #roi_grid_box.addWidget(QLabel("Grid Size (pix)"))
         #roi_grid_box.addWidget(self.roi_grid_size_selector)
         roi_definition_group_box.addLayout(roi_grid_box)
+        ngrid_rois_label = QLabel("nGridRois")
+        roi_grid_box.addWidget(ngrid_rois_label)  # Add label to the layout
         self.grid_roi_number_lcd = QLCDNumber()
         self.grid_roi_number_lcd.setObjectName("gridRoiNumber")
         self.grid_roi_number_lcd.setStyleSheet("QLCDNumber { background-color: grey; color: green; }")
@@ -730,15 +790,23 @@ class App(QMainWindow):
         """ Handle Browse button for EOVSA FITS file"""
         # self.fname = QFileDialog.getExistingDirectory(self, 'Select FITS File', './', QFileDialog.ShowDirsOnly)
         ## quick input for debug -------------
-        self.eoimg_fname, _file_filter = QFileDialog.getOpenFileName(self, 'Select EOVSA Spectral Image FITS File',
+        tmp_eoimg_fname_seq, _file_filter = QFileDialog.getOpenFileNames(self, 'Select EOVSA Spectral Image FITS File(s)',
                                                                      './', 'FITS Images (*.fits *.fit *.ft *.fts)')
+        self.data_in_seq = len(tmp_eoimg_fname_seq) > 1
+        self.eoimg_time_seq = tmp_eoimg_fname_seq
+        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
+        self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
+        self.cur_frame_idx = 0
+        self.eoimg_files_seq_select_return()
+        print('{} files are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
+        
         # self.eoimg_fname = 'EOVSA_20210507T190135.000000.outim.image.allbd.fits'
         ## quick input for debug -------------
         # self.eoimg_fitsentry.setText(self.eoimg_fname)
-        self.eoimg_file_select_return()
 
-    def eoimg_file_select_return(self):
-        ''' Called when the FITS filename LineEdit widget gets a carriage-return.
+
+    def eoimg_files_seq_select_return(self):
+        ''' Called when load eoimg in a time sequence.
             Trys to read FITS header and return header info (no data read at this time)
         '''
 
@@ -763,6 +831,7 @@ class App(QMainWindow):
             self.has_rois = False
 
         try:
+        #if True:
             meta, data = ndfits.read(self.eoimg_fname)
             if meta['naxis'] < 3:
                 print('Input fits file must have at least 3 dimensions. Abort..')
@@ -793,13 +862,30 @@ class App(QMainWindow):
                                     self.meta['ny'] * self.dy]
             self.mapx, self.mapy = np.linspace(self.x0, self.x1, meta['nx']), np.linspace(self.y0, self.y1, meta['ny'])
             self.tp_cal_factor = np.ones_like(self.cfreqs)
+
             self.has_eovsamap = True
             with fits.open(self.eoimg_fname, mode='readonly') as wcs_hdul:
                 self.eo_wcs = wcs.WCS(wcs_hdul[0].header)
             # self.infoEdit.setPlainText(repr(rheader))
+            #extend a time axis to the data:
+            self.eoimg_date_seq = []
+            self.eoimg_exptime_seq = []
+            new_4d_data = np.repeat(np.expand_dims(self.data, axis=1), repeats=len(self.eoimg_time_seq), axis=1)
+            for cf_idx, c_eo_file in enumerate(self.eoimg_time_seq):
+                cmeta, cdata = ndfits.read(c_eo_file)
+                self.eoimg_date_seq.append(cmeta['refmap'].date)
+                self.eoimg_exptime_seq.append(TimeDelta(cmeta['refmap'].meta['exptime'], format='sec'))
+                new_4d_data[self.pol_select_idx, cf_idx,:,:,:] = cdata[self.pol_select_idx, :,:,:]
+            self.data = new_4d_data
+            self.eoimg_seq_slider.setMaximum(len(self.eoimg_time_seq)-1)
+            self.eoimg_seq_slider.setValue(self.cur_frame_idx)
+            self.text_box_time.setText(self.eoimg_date_seq[self.cur_frame_idx].iso[11:])
         except:
+        #else:
             self.statusBar.showMessage('Filename is not a valid FITS file', 2000)
             self.eoimg_fname = '<Select or enter a valid fits filename>'
+            self.eoimg_time_seq = []
+            self.cur_frame_idx = 0
             # self.eoimg_fitsentry.setText(self.eoimg_fname)
             # self.infoEdit.setPlainText('')
 
@@ -809,9 +895,26 @@ class App(QMainWindow):
             self.showqlookimg()
         # Clean up all existing plots
 
-        # self.plot_qlookmap()
+        #self.plot_qlookmap()
         self.init_pgspecplot()
         self.plot_pg_eovsamap()
+        if self.has_dspec:
+            self.plot_dspec()
+
+    def time_slider_slided(self):
+        self.text_box_time.setText(self.eoimg_date_seq[self.eoimg_seq_slider.value()].iso[11:])
+
+    def time_slider_released(self):
+        self.cur_frame_idx = self.eoimg_seq_slider.value()
+        self.plot_eoimgs_trange_on_dspec()
+        # if not self.qlookimgbutton.isChecked():
+        #     self.qlookimgbutton.setChecked(True)
+        # else:
+        #     self.showqlookimg()
+        self.init_pgspecplot()
+        self.plot_pg_eovsamap()
+        self.calc_roi_spec(None)
+        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
 
     def eodspec_file_select(self):
         """ Handle Browse button for EOVSA FITS file"""
@@ -943,12 +1046,14 @@ class App(QMainWindow):
         self.update_pgspec()
 
     def plot_qlookmap(self):
+        #todo qlook is totally messed up at this moment, will be fixed soon.
         """Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map"""
         # Plot a quicklook map
         # self.qlook_ax.clear()
         ax0 = self.qlookimg_axs[0]
 
         if self.has_eovsamap:
+            ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
             nspw = self.meta['nfreq']
             self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
                                                 self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
@@ -971,6 +1076,7 @@ class App(QMainWindow):
 
         if os.path.exists(self.aiafname):
             try:
+                #aiamap = sunpy.map.Map(sunpy.data.sample.SWAP_LEVEL1_IMAGE)
                 aiamap = smap.Map(self.aiafname)
                 self.has_aiamap = True
             except:
@@ -984,6 +1090,9 @@ class App(QMainWindow):
         cts = []
         if self.has_aiamap:
             aiacmap = plt.get_cmap('gray_r')
+            #ax0 = self.update_axes_projection(ax0, projection=aiamap)
+            #blbl = self.meta['refmap'].bottom_left_coord
+            #submap_aia = aiamap.submap(bottom_left=self.meta['refmap'].bottom_left_coord, top_right=self.meta['refmap'].top_right_coord)
             ax0 = self.update_axes_projection(ax0, projection=aiamap)
             aiamap.plot(axes=ax0, cmap=aiacmap, clip_interval=(1, 99.99) * u.percent)
             ax0.set_title('')
@@ -994,14 +1103,21 @@ class App(QMainWindow):
                 ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
             bounds = ax0.axis()
             for s, sp in enumerate(self.cfreqs):
-                data = self.data[self.pol_select_idx, s, ...]
+                #data = self.data[self.pol_select_idx, s, ...]
+                data = self.data[self.pol_select_idx, self.cur_frame_idx, s, ...]
                 cur_sunmap = smap.Map(data, self.meta['refmap'].meta)
                 clvls = self.clevels * np.nanmax(data) * u.K
                 rcmap = [icmap(self.freq_dist(self.cfreqs[s]))] * len(clvls)
-                cts.append(cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha))
-                if not self.opencontour:
-                    continue
-                    # todo
+                #if not self.has_aiamap:
+                cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
+                #else:
+                #    submap_eovsa = cur_sunmap.submap(bottom_left=aiamap.bottom_left_coord,
+                #                           top_right=aiamap.top_right_coord)
+                #    submap_eovsa.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
+                #cts.append(cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha))
+                # if not self.opencontour:
+                #     continue
+                #     # todo
             if self.has_aiamap:
                 ax0.axis(bounds)
 
@@ -1028,6 +1144,10 @@ class App(QMainWindow):
         tim_plt = self.dspec['time_axis'].plot_date
         fghz = self.dspec['freq_axis']
         spec = self.dspec['dspec']
+        if not vmin:
+            vmin = np.nanmin(spec)
+        if not vmax:
+            vmax = np.percentile(spec.flatten(), 90)
         observatory = self.dspec['observatory']
         pol = self.dspec['pol']
         ##todo: now I am only using the first polarization and first baseline
@@ -1073,6 +1193,65 @@ class App(QMainWindow):
                                                       bottom=0.20, top=0.92,
                                                       hspace=0, wspace=0)
         self.qlookdspec_canvas.draw()
+        self.plot_eoimgs_trange_on_dspec()
+
+
+
+    def plot_eoimgs_trange_on_dspec(self):
+        from matplotlib import dates as mdates
+        def onclick_eoimg_trange(event):
+            for irect, rect in enumerate(rectangles):
+                if rect.contains(event)[0]:  # Check if click is inside the rectangle
+                    self.cur_frame_idx = irect
+                    self.eoimg_seq_slider.setValue(self.cur_frame_idx)
+                    self.init_pgspecplot()
+                    self.plot_pg_eovsamap()
+                    self.calc_roi_spec(None)
+                    self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
+                    #plot_spans()  # Call to redraw the spans
+                    break
+
+        def get_or_create_twinx(ax):
+            fig = ax.figure
+            twin_ax = None
+            for other_ax in fig.axes:
+                if other_ax is not ax and other_ax.get_position() == ax.get_position():
+                    if ax.get_shared_x_axes().joined(ax, other_ax) or ax.get_shared_y_axes().joined(ax, other_ax):
+                        twin_ax = other_ax
+                        break
+            if twin_ax is None:
+                twin_ax = ax.twinx()
+            return twin_ax
+
+        def plot_spans():
+            ax.cla()  # Clear previous spans
+            for cframei, (start, end) in enumerate(eoimg_tr_list):
+                #c_color = 'crimson' if cframei == self.cur_frame_idx else 'navy'
+                c_color = 'crimson'
+                rect = ax.axvspan(start, end, color=c_color, alpha=0.5)
+                rectangles.append(rect)
+
+        if self.has_eovsamap and self.has_dspec:
+            ax = get_or_create_twinx(self.qlookdspec_ax)
+            #ax = self.qlookdspec_ax
+            eoimg_tr_list = [[cdate.plot_date, (cdate + cdelta).plot_date] for cdate, cdelta in
+                             zip(self.eoimg_date_seq, self.eoimg_exptime_seq)]
+            rectangles = []
+            plot_spans()  # Initial call to plot the spans
+            ax.figure.canvas.mpl_connect('button_press_event', onclick_eoimg_trange)
+            if len(rectangles)>1:
+                cur_total_range = self.eoimg_date_seq[-1] - self.eoimg_date_seq[0]
+                ax.set_xlim([max(ax.get_xlim()[0], (self.eoimg_date_seq[0] - 3*cur_total_range).plot_date),
+                            min(ax.get_xlim()[1], (self.eoimg_date_seq[-1] + 3*cur_total_range).plot_date)])
+            ax.xaxis_date()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            locator = mdates.AutoDateLocator()
+            ax.xaxis.set_major_locator(locator)
+            ax.set_yticks([])
+            ax.spines['right'].set_visible(False)
+        else:
+            print('EOVSA image(s) or Dspec is(are) not loaded yet')
+
 
     def update_axes_projection(self, cax, projection):
         pos = cax.get_position()
@@ -1089,8 +1268,11 @@ class App(QMainWindow):
             # self.pg_img_plot.setLimits(xMin=self.x0, xMax=self.x1, yMin=self.y0, yMax=self.y1)
             # self.pgdata = self.data[self.pol_select_idx, :, ::-1, :].reshape(
             #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
-            self.pgdata = self.data[self.pol_select_idx, :, :, :].reshape(
+            # self.pgdata = self.data[self.pol_select_idx, :, :, :].reshape(
+            #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
+            self.pgdata = self.data[self.pol_select_idx,self.cur_frame_idx, :, :, :].reshape(
                 (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
+            #self.pgdata = self.data[self.pol_select_idx,self.cur_frame_idx, :, :, :]
             pos = np.where(self.pgdata > 1e9)
             self.pgdata[pos] = 1e9
             del pos
@@ -1098,6 +1280,8 @@ class App(QMainWindow):
             self.pgdata[pos] = -1000
             del pos
             # self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs)
+            # self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs, pos=[self.x0, self.y0],
+            #                             scale=[self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
             self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs, pos=[self.x0, self.y0],
                                         scale=[self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
             # self.pg_img_canvas.setImage(self.data[self.pol_select_idx], xvals=self.cfreqs)
@@ -1371,6 +1555,7 @@ class App(QMainWindow):
             return None
 
     def add_new_roi(self):
+
         """Add a ROI region to the selection"""
         self.roi_type = self.toolBarButtonGroup.checkedButton().text()
         ischildROI = False
@@ -1491,10 +1676,13 @@ class App(QMainWindow):
                                       pen=(colorid, 9),
                                       removable=True)
             self.new_roi.addRotateHandle([1.0, 0.5], [0.5, 0.5])
+        if hasattr(self, 'predefinedroi'):
+            self.new_roi = self.predefinedroi
 
         self.new_roi.ischildROI = ischildROI
-        if self.vis_roi:
-            self.pg_img_canvas.addItem(self.new_roi)
+        self.pg_img_canvas.addItem(self.new_roi)
+        if not self.vis_roi:
+            self.new_roi.setVisible(False)
         self.new_roi.freq_mask = np.ones_like(self.cfreqs) * False
         self.new_roi.sigRegionChanged.connect(self.calc_roi_spec)
         self.new_roi.sigRemoveRequested.connect(self.remove_ROI)
@@ -1529,6 +1717,17 @@ class App(QMainWindow):
             self.calc_roi_spec(None)
 
         # self.roi_slider_rangechange()
+
+
+    def add_pre_defined_roi(self, serialized_rois):
+        self.add2slice.setChecked(False)
+        self.vis_roi = False
+        for roi_str in serialized_rois:
+            cur_roi = self.deserialize_roi(roi_str)
+            self.predefinedroi = cur_roi
+            self.add_new_roi()
+        delattr(self, 'predefinedroi')
+
 
     def remove_ROI(self, evt):
         if evt.ischildROI:
@@ -1642,7 +1841,6 @@ class App(QMainWindow):
         self.roi_group_idx += 1
         self.rectButton.setChecked(True)
         for cri, crect in enumerate(recieved_rois[0]):
-            print(cri)
             self.xcen = crect[0][0]
             self.ycen = crect[0][1]
             self.xsiz = crect[1][0]*20.0
@@ -1663,6 +1861,7 @@ class App(QMainWindow):
         self.number_grid_rois = len(self.grid_rois)
         self.grid_roi_number_lcd.display(self.number_grid_rois)
         self.has_grid_rois=True
+        self.pixelized_grid_rois=recieved_rois[1]
         self.roi_group_selection_update()
         self.update_rois_on_canvas()
 
@@ -1679,7 +1878,6 @@ class App(QMainWindow):
             self.customized_rois_Form.show()
             cur_result = self.customized_rois_Form.exec()
             crtf_list = ui.getResult(self.customized_rois_Form)
-            print('cur_result: ', crtf_list)
             return (crtf_list, cur_result)
         except:
             msg_box = QMessageBox(QMessageBox.Warning, 'No EOVSA Image Loaded', 'Load EOVSA Image first!')
@@ -1766,9 +1964,9 @@ class App(QMainWindow):
                 roi.tb_max = ma.masked_array(roi.tb_max, roi.freq_mask)
                 roi.tb_mean = ma.masked_array(roi.tb_mean, roi.freq_mask)
                 roi.total_flux = ma.masked_array(roi.total_flux, roi.freq_mask)
-
-        if 'roi' in vars():
-            self.roi_info.setText('[Current ROI] xcen: {0:6.1f}", ycen: {1:6.1f}", '
+        if self.update_gui:
+            if 'roi' in vars():
+                self.roi_info.setText('[Current ROI] xcen: {0:6.1f}", ycen: {1:6.1f}", '
                                   'xwid: {2:6.1f}", ywid: {3:6.1f}", '
                                   'freq: {4:4.1f} GHz, '
                                   'T<sub>B</sub><sup>max</sup>: {5:5.1f} MK, '
@@ -1780,7 +1978,7 @@ class App(QMainWindow):
                                          roi.tb_mean[self.pg_freq_idx] / 1e6,
                                          roi.total_flux[self.pg_freq_idx]))
         # self.update_fitmask()
-        self.update_pgspec()
+            self.update_pgspec()
 
     def combine_roi_group_flux(self):
         """
@@ -1846,12 +2044,14 @@ class App(QMainWindow):
     def apply_tpcal_factor(self):
         if self.apply_tpcal_factor_button.isChecked() == True:
             self.statusBar.showMessage('Apply total power correction factor to data.')
-            self.data[self.pol_select_idx] /= self.tp_cal_factor[:, None, None]
+            #self.data[self.pol_select_idx] /= self.tp_cal_factor[:, None, None]
+            self.data[self.pol_select_idx] /= self.tp_cal_factor[None, :, None, None]
             self.tpcal_factor_applied = True
             self.calc_roi_spec(None)
         else:
             self.statusBar.showMessage('Unapply total power correction factor to data.')
-            self.data[self.pol_select_idx] *= self.tp_cal_factor[:, None, None]
+            #self.data[self.pol_select_idx] *= self.tp_cal_factor[:, None, None]
+            self.data[self.pol_select_idx] *= self.tp_cal_factor[None, :, None, None]
             self.tpcal_factor_applied = False
             self.calc_roi_spec(None)
 
@@ -1995,7 +2195,7 @@ class App(QMainWindow):
             self.fit_kws = {'niter': 50, 'T': 90., 'stepsize': 0.8,
                             'interval': 25}
         if self.fit_method == 'mcmc':
-            self.fit_kws = {'steps': 1000, 'burn': 300, 'thin': 10}
+            self.fit_kws = {'steps': 1000, 'burn': 300, 'thin': 10, 'workers':8}
 
     def update_fit_kws_widgets(self):
         # first delete every widget for the fit keywords
@@ -2180,8 +2380,11 @@ class App(QMainWindow):
             self.qlookdspecbox.parent().setStretch(1, 0)
             self.qlookdspecbox.parent().setStretch(2, 0)
 
-    def do_spec_fit(self):
-        roi = self.rois[self.roi_group_idx][self.current_roi_idx]
+    def do_spec_fit(self, local_roi_idx=None):
+        #update_gui = Flase for paralell fitting
+        if self.update_gui:
+            local_roi_idx = self.current_roi_idx
+        roi = self.rois[self.roi_group_idx][local_roi_idx]
         freqghz_tofit = roi.freqghz_tofit.compressed()
         spec_tofit = roi.spec_tofit.compressed()
         spec_err_tofit = roi.spec_err_tofit.compressed()
@@ -2194,13 +2397,13 @@ class App(QMainWindow):
         if self.fit_method == 'nelder' or self.fit_method == 'mcmc':
             fit_kws = {'options': self.fit_kws}
 
-        print(fit_kws)
-
-        if hasattr(self, 'spec_fitplot'):
-            self.speccanvas.removeItem(self.spec_fitplot)
+        if self.update_gui:
+            if hasattr(self, 'spec_fitplot'):
+                self.speccanvas.removeItem(self.spec_fitplot)
         if self.fit_function != gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
             print("Not yet implemented")
         else:
+            exported_fittig_info = []
             if self.fit_method != 'mcmc':
                 mini = lmfit.Minimizer(self.fit_function, self.fit_params,
                                        fcn_args=(freqghz_tofit,),
@@ -2209,19 +2412,22 @@ class App(QMainWindow):
                                        max_nfev=max_nfev, nan_policy='omit')
                 method = self.fit_method
                 mi = mini.minimize(method=method, **fit_kws)
+                exported_fittig_info.append(mi)
                 print(method + ' minimization results')
                 print(lmfit.fit_report(mi, show_correl=True))
-                self.fit_params_res = mi.params
                 print('==========Fit Parameters Updated=======')
-                for n, key in enumerate(self.fit_params_res):
-                    self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+                if self.update_gui:
+                    self.fit_params_res = mi.params
+                    for n, key in enumerate(self.fit_params_res):
+                        self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
 
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
                 spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
-                self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
-                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                if self.update_gui:
+                    self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                         pen=dict(color=pg.mkColor(local_roi_idx), width=4),
                                                          symbol=None, symbolBrush=None)
-                self.speccanvas.addItem(self.spec_fitplot)
+                    self.speccanvas.addItem(self.spec_fitplot)
             else:
                 fit_kws_nelder = {'maxiter': 2000, 'tol': 0.01}
                 mini = lmfit.Minimizer(self.fit_function, self.fit_params,
@@ -2247,107 +2453,547 @@ class App(QMainWindow):
                                                 'spec_in_tb': self.spec_in_tb},
                                        max_nfev=max_nfev, nan_policy='omit')
                 emcee_params = mini.minimize(method='emcee', **emcee_kws)
+
                 print(lmfit.report_fit(emcee_params.params))
-                chain = emcee_params.flatchain
-                shape = chain.shape[0]
+                if self.update_gui:
+                    chain = emcee_params.flatchain
+                    shape = chain.shape[0]
 
-                for n, key in enumerate(self.fit_params_res):
-                    try:
-                        self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
-                    except KeyError:
-                        pass
-                freqghz_toplot = np.logspace(0, np.log10(20.), 100)
-
-                for i in range(burn, shape, thin):
                     for n, key in enumerate(self.fit_params_res):
                         try:
-                            mi.params[key].value = chain[key][i]
+                            self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
                         except KeyError:
                             pass
-                    spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
-                    self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
-                                                             pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
-                                                             symbol=None, symbolBrush=None)
-                    self.spec_fitplot.setAlpha(0.01, False)
-                    self.speccanvas.addItem(self.spec_fitplot)
+                    freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+
+                    for i in range(burn, shape, thin):
+                        for n, key in enumerate(self.fit_params_res):
+                            try:
+                                mi.params[key].value = chain[key][i]
+                            except KeyError:
+                                pass
+                        spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
+                        self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                                 pen=dict(color=pg.mkColor(local_roi_idx), width=4),
+                                                                 symbol=None, symbolBrush=None)
+                        self.spec_fitplot.setAlpha(0.01, False)
+                        self.speccanvas.addItem(self.spec_fitplot)
+                else:
+                    freqghz_toplot = np.logspace(0, np.log10(20.), 100)
                 mi.params = emcee_params.params
-            ## Surajit
+                exported_fittig_info.append((emcee_params, mi))
+
             if self.savedata == True:
+                file_write_lock = threading.Lock()
+                with file_write_lock:
+                    #self.save_res_to_hdf5_file(local_roi_idx, mi, freqghz_toplot, spec_fit_res)
+                    self.save_res_to_fits_file(local_roi_idx, mi, freqghz_toplot, spec_fit_res)
 
-                roi_props = (self.rois[self.roi_group_idx][self.current_roi_idx]).saveState()
-                roi_pos = [i for i in roi_props['pos']]
-                roi_size = [i for i in roi_props['size']]
-                roi_angle = roi_props['angle']
-                filename, ok2 = QFileDialog.getSaveFileName(None,
-                                                            "Save the selected group ()",
-                                                            os.getcwd(),
-                                                            "All Files (*)")
-                if ok2:
-                    hf = h5py.File(filename, 'w')
-                    hf.attrs['roi_pos'] = roi_pos
-                    hf.attrs['roi_size'] = roi_size
-                    hf.attrs['roi_angle'] = roi_angle
-                    hf.attrs['image_file'] = self.eoimg_fname
-                    hf.attrs['spec_file'] = self.eodspec_fname
-                    hf.attrs['lower_freq'] = self.fit_freq_bound[0]
-                    hf.attrs['higher_freq'] = self.fit_freq_bound[1]
+            if not self.update_gui:
+                exported_fittig_info.append(freqghz_toplot)
+                exported_fittig_info.append(self.fit_method)
 
-                    if self.fit_function == gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
-                        hf.attrs['Bx100G'] = np.array([self.fit_params['Bx100G'].init_value, \
-                                                       self.fit_params['Bx100G'].min, self.fit_params['Bx100G'].max, \
-                                                       mi.params['Bx100G'].value, mi.params['Bx100G'].stderr])
-                        hf.attrs['log_nnth'] = np.array([self.fit_params['log_nnth'].init_value, \
-                                                         self.fit_params['log_nnth'].min,
-                                                         self.fit_params['log_nnth'].max, \
-                                                         mi.params['log_nnth'].value, mi.params['log_nnth'].stderr])
-                        hf.attrs['delta'] = np.array([self.fit_params['delta'].init_value, \
-                                                      self.fit_params['delta'].min, self.fit_params['delta'].max, \
-                                                      mi.params['delta'].value, mi.params['delta'].stderr])
-                        hf.attrs['Emin_keV'] = np.array([self.fit_params['Emin_keV'].init_value, \
-                                                         self.fit_params['Emin_keV'].min,
-                                                         self.fit_params['Emin_keV'].max, \
-                                                         mi.params['Emin_keV'].value, mi.params['Emin_keV'].stderr])
-                        hf.attrs['Emax_MeV'] = np.array([self.fit_params['Emax_MeV'].init_value, \
-                                                         self.fit_params['Emax_MeV'].min,
-                                                         self.fit_params['Emax_MeV'].max, \
-                                                         mi.params['Emax_MeV'].value, mi.params['Emax_MeV'].stderr])
-                        hf.attrs['theta'] = np.array([self.fit_params['theta'].init_value, \
-                                                      self.fit_params['theta'].min, self.fit_params['theta'].max, \
-                                                      mi.params['theta'].value, mi.params['theta'].stderr])
-                        hf.attrs['log_nth'] = np.array([self.fit_params['log_nth'].init_value, \
-                                                        self.fit_params['log_nth'].min, self.fit_params['log_nth'].max, \
-                                                        mi.params['log_nth'].value, mi.params['log_nth'].stderr])
-                        hf.attrs['T_MK'] = np.array([self.fit_params['T_MK'].init_value, \
-                                                     self.fit_params['T_MK'].min, self.fit_params['T_MK'].max, \
-                                                     mi.params['T_MK'].value, mi.params['T_MK'].stderr])
-                        hf.attrs['depth_asec'] = np.array([self.fit_params['depth_asec'].init_value, \
-                                                           self.fit_params['depth_asec'].min,
-                                                           self.fit_params['depth_asec'].max, \
-                                                           mi.params['depth_asec'].value,
-                                                           mi.params['depth_asec'].stderr])
+    def save_res_to_hdf5_file(self, local_roi_idx, minimiz_res, freqghz_toplot ,spec_fit_res):
+        ## Surajit
+        roi = self.rois[self.roi_group_idx][local_roi_idx]
+        def create_attr_array(fit_params, mi_params, param_name):
+            stderr = mi_params[param_name].stderr if mi_params[
+                                                         param_name].stderr is not None else np.nan
+            return np.array([
+                fit_params[param_name].init_value,
+                fit_params[param_name].min,
+                fit_params[param_name].max,
+                mi_params[param_name].value,
+                stderr
+            ])
 
-                    if self.spec_in_tb:
-                        spec = roi.tb_max
-                        spec_bound = self.tb_spec_bound
-                        spec_rms = self.bkg_roi.tb_rms
-                    else:
-                        spec = roi.total_flux
-                        spec_bound = self.flx_spec_bound
-                        spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
-                                                  area=roi.total_area * u.arcsec ** 2, reverse=True).value
-                        hf.attrs['area_asec2'] = np.array([self.fit_params['area_asec2'].init_value, \
-                                                           self.fit_params['area_asec2'].min,
-                                                           self.fit_params['area_asec2'].max, \
-                                                           mi.params['area_asec2'].value,
-                                                           mi.params['area_asec2'].stderr])
-                    # add fractional err in quadrature
-                    spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
-                    hf.create_dataset('observed_spectrum', data=spec)
-                    hf.create_dataset('error', data=spec_err)
-                    hf.create_dataset('obs_freq', data=self.cfreqs)
-                    hf.create_dataset('model_freq', data=freqghz_toplot)
-                    hf.create_dataset('model_spectrum', data=spec_fit_res)
-                    hf.close()
+
+        roi_props = (self.rois[self.roi_group_idx][local_roi_idx]).saveState()
+        roi_pos = [i for i in roi_props['pos']]
+        roi_size = [i for i in roi_props['size']]
+        roi_angle = roi_props['angle']
+        if self.update_gui:
+            filename, ok2 = QFileDialog.getSaveFileName(None,
+                                                        "Save the selected group ()",
+                                                        os.getcwd(),
+                                                        "All Files (*)")
+        else:
+            # filename = os.path.join(self.batch_fitting_dir, 'roi_{0:0=3d}.hdf5'.format(local_roi_idx))
+            filename = os.path.join(self.tmp_save_folder, 'roi_{0:0=3d}.hdf5'.format(local_roi_idx))
+            ok2 = True
+        if ok2 or not self.update_gui:
+            print('Fitting results will be saved to: ', filename)
+            # hf = h5py.File(filename, 'w')
+            with h5py.File(filename, 'w') as hf:
+                hf.attrs['roi_pos'] = roi_pos
+                hf.attrs['roi_size'] = roi_size
+                hf.attrs['roi_angle'] = roi_angle
+                hf.attrs['image_file'] = self.eoimg_fname
+                hf.attrs['spec_file'] = self.eodspec_fname
+                hf.attrs['lower_freq'] = self.fit_freq_bound[0]
+                hf.attrs['higher_freq'] = self.fit_freq_bound[1]
+
+                param_names = ['Bx100G', 'log_nnth', 'delta', 'Emin_keV', 'Emax_MeV', 'theta',
+                               'log_nth', 'T_MK', 'depth_asec']
+                for name in param_names:
+                    hf.attrs[name] = create_attr_array(self.fit_params, minimiz_res.params, name)
+
+                if self.spec_in_tb:
+                    spec = roi.tb_max
+                    spec_bound = self.tb_spec_bound
+                    spec_rms = self.bkg_roi.tb_rms
+                else:
+                    spec = roi.total_flux
+                    spec_bound = self.flx_spec_bound
+                    spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
+                                              area=roi.total_area * u.arcsec ** 2, reverse=True).value
+                    hf.attrs['area_asec2'] = np.array([self.fit_params['area_asec2'].init_value, \
+                                                       self.fit_params['area_asec2'].min,
+                                                       self.fit_params['area_asec2'].max, \
+                                                       minimiz_res.params['area_asec2'].value,
+                                                       minimiz_res.params['area_asec2'].stderr])
+                # add fractional err in quadrature
+                spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+                hf.create_dataset('observed_spectrum', data=spec)
+                hf.create_dataset('error', data=spec_err)
+                hf.create_dataset('obs_freq', data=self.cfreqs)
+                hf.create_dataset('model_freq', data=freqghz_toplot)
+                hf.create_dataset('model_spectrum', data=spec_fit_res)
+                # hf.close()
+
+    def save_res_to_fits_file(self, local_roi_idx, minimiz_res, freqghz_toplot, spec_fit_res):
+        # Create a FITS header with metadata
+        roi = self.rois[self.roi_group_idx][local_roi_idx]
+        header = fits.Header()
+        header['roi_str'] = str(self.serialize_roi(roi))
+        header['roi_ang'] = (self.rois[self.roi_group_idx][local_roi_idx]).saveState()['angle']
+        header['img_file'] = self.eoimg_fname
+        header['spec_file'] = self.eodspec_fname
+        header['low_freq'] = self.fit_freq_bound[0]
+        header['high_freq'] = self.fit_freq_bound[1]
+        header['high_freq'] = self.fit_freq_bound[1]
+        header['fit_method'] = self.fit_method
+        header['fit_function'] = self.ele_dist
+
+        def create_parameters_table(fit_params, mi_params):
+            param_data = []
+            for name, param in fit_params.items():
+                stderr = mi_params[name].stderr if mi_params[name].stderr is not None else np.nan
+                param_data.append((name, param.value, param.min, param.max, param.vary, stderr))
+
+            dtype = [('name', 'S10'), ('value', 'f8'), ('min', 'f8'), ('max', 'f8'), ('vary', 'bool'), ('stderr', 'f8')]
+            structured_array = np.array(param_data, dtype=dtype)
+            return fits.BinTableHDU.from_columns(structured_array)
+
+
+        # def create_attr_array(fit_params, mi_params, param_name):
+        #     if param_name not in mi_params:
+        #         return np.array([np.nan, np.nan, np.nan, np.nan, np.nan])  # Default values for missing parameter
+        #     stderr = mi_params[param_name].stderr if mi_params[param_name].stderr is not None else np.nan
+        #     return np.array([
+        #         fit_params[param_name].init_value if param_name in fit_params else np.nan,
+        #         fit_params[param_name].min if param_name in fit_params else np.nan,
+        #         fit_params[param_name].max if param_name in fit_params else np.nan,
+        #         mi_params[param_name].value,
+        #         stderr
+        #     ])
+        #
+        # param_names = ['Bx100G', 'log_nnth', 'delta', 'Emin_keV', 'Emax_MeV', 'theta', 'log_nth', 'T_MK', 'depth_asec', 'area_asec2']
+        # for i, name in enumerate(param_names):
+        #     header['PARAM{}'.format(i)] = str(create_attr_array(self.fit_params, minimiz_res.params, name))
+
+        primary_hdu = fits.PrimaryHDU(header=header)
+
+        if self.spec_in_tb:
+            spec = roi.tb_max
+            spec_err = np.sqrt(self.bkg_roi.tb_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+        else:
+            spec = roi.total_flux
+            spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
+                                      area=roi.total_area * u.arcsec ** 2, reverse=True).value
+            spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+
+        observed_spectrum_hdu = fits.ImageHDU(spec, name='OBSERVED_SPECTRUM')
+        error_hdu = fits.ImageHDU(spec_err, name='ERROR')
+        obs_freq_hdu = fits.ImageHDU(self.cfreqs, name='OBS_FREQ')
+        model_freq_hdu = fits.ImageHDU(freqghz_toplot, name='MODEL_FREQ')
+        model_spectrum_hdu = fits.ImageHDU(spec_fit_res, name='MODEL_SPECTRUM')
+        params_table_hdu = create_parameters_table(self.fit_params, minimiz_res.params)
+
+        # Create an HDUList and save to a FITS file
+        hdul = fits.HDUList(
+            [primary_hdu, observed_spectrum_hdu, error_hdu, obs_freq_hdu, model_freq_hdu, model_spectrum_hdu, params_table_hdu])
+
+        if self.update_gui:
+            filename, ok2 = QFileDialog.getSaveFileName(None, "Save the selected group ()", os.getcwd(),
+                                                        "FITS Files (*.fits)")
+        else:
+            filename = os.path.join(self.tmp_save_folder, 'roi_{0:0=3d}.fits'.format(local_roi_idx))
+            ok2 = True
+
+        if ok2 or not self.update_gui:
+            print('Fitting results will be saved to: ', filename)
+            hdul.writeto(filename, overwrite=True)
+        # #just for testing
+        # def read_fits_file(filename):
+        #     with fits.open(filename) as hdul:
+        #         primary_hdu = hdul[0]
+        #         header = primary_hdu.header
+        #         print("Metadata from FITS file:")
+        #         for key in header.keys():
+        #             print(f"{key}: {header[key]}")
+        #         for hdu in hdul[1:]:
+        #             print(f"\nData from HDU '{hdu.name}':")
+        #             data = hdu.data
+        #             print(data)
+        # read_fits_file(filename) # for testing
+
+    def update_gui_after_fitting(self):
+        ##todo: update GUI after spectral fitting to make paralell mode work in the regular GUI mode
+        #pass
+        fitting_info = self.exported_fittig_info
+        if hasattr(self, 'spec_fitplot'):
+            self.speccanvas.removeItem(self.spec_fitplot)
+        #--------
+        if fitting_info[2]!='mcmc':
+            self.fit_params_res = fitting_info[0].params
+            spec_fit_res = self.fit_function(fitting_info[0].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
+            self.spec_fitplot = self.speccanvas.plot(x=fitting_info[1], y=np.log10(spec_fit_res),
+                                                 pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                 symbol=None, symbolBrush=None)
+            self.speccanvas.addItem(self.spec_fitplot)
+        else:
+            self.fit_params_res = fitting_info[0][0].params
+            chain = fitting_info[0][0].flatchain
+            shape = chain.shape[0]
+            #----------
+            burn = self.fit_kws['burn']
+            thin = self.fit_kws['thin']
+            steps = self.fit_kws['steps']
+            for n, key in enumerate(self.fit_params_res):
+                try:
+                    self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
+                except KeyError:
+                    pass
+            #freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+
+            for i in range(burn, shape, thin):
+                for n, key in enumerate(self.fit_params_res):
+                    try:
+                        fitting_info[0][1].params[key].value = chain[key][i]
+                    except KeyError:
+                        pass
+                spec_fit_res = self.fit_function(fitting_info[0][1].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
+                self.spec_fitplot = self.speccanvas.plot(x=np.log10(fitting_info[1]), y=np.log10(spec_fit_res),
+                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                         symbol=None, symbolBrush=None)
+                self.spec_fitplot.setAlpha(0.01, False)
+                self.speccanvas.addItem(self.spec_fitplot)
+        for n, key in enumerate(self.fit_params_res):
+            self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+
+    def parallel_fitting(self):
+
+        self.total_tasks = len(self.rois[0])
+
+        self.threadpool.setMaxThreadCount(self.ncpu_spinbox.value())
+        self.fit_threads.clear()
+        self.calc_roi_spec(None)
+        self.update_fitmask()
+        self.tmp_folder = tempfile.mkdtemp(dir = self.batch_fitting_dir)
+        self.tmp_save_folder = self.tmp_folder
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setMaximum(self.total_tasks)
+        self.timer.start()
+
+        for croi_idx, croi in enumerate(self.rois[0]):
+            fit_task = gstools.FitTask(self, croi_idx)
+            #fit_task.signals.completed.connect(self.task_completed)
+            #fit_task.completed.connect(self.task_completed)
+            #fit_task.signals.connect(self.task_completed)
+            self.threadpool.start(fit_task)
+        self.threadpool.waitForDone()
+        self.check_tasks_completion()
+
+        #import shutil
+        #shutil.rmtree(self.tmp_folder)
+
+
+
+    def check_tasks_completion(self):
+        search_pattern = os.path.join(self.tmp_folder, '*.fits')
+        fit_res_files = glob.glob(search_pattern)
+        #if self.completed_tasks == self.total_tasks:
+        if len(fit_res_files) == self.total_tasks:
+            self.timer.stop()
+            print("{} tasks are finished. ".format(self.total_tasks))
+            final_save = os.path.join(self.batch_fitting_dir,
+                                      os.path.basename(self.eoimg_fname).replace('.fits', '_fit_res.fits'))
+            #self.combine_hdf5_files(final_path=final_save, original_files=hdf5_files)
+            self.combine_fits_files(final_path=final_save, original_files=fit_res_files)
+
+    @pyqtSlot()
+    def task_completed(self):
+        print('The slot is working')
+        self.completed_tasks += 1
+        # progress = int((self.completed_tasks / self.total_tasks) * 100)
+        # self.progress_bar.setValue(progress)
+        # self.progress_bar.show()
+    def pathBatchFitRes(self):
+        # Open the directory selection dialog
+        options = QFileDialog.Options()
+        options |= QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "", options)
+        if directory:
+            print(f"Selected directory: {directory}")
+        else:
+            print("No directory selected, using home instead.")
+            directory = os.path.expanduser("~")
+        self.batch_fitting_dir = directory
+
+    def closeEvent(self, event):
+        if any(thread.isRunning() for thread in self.fit_threads):
+            print('Fittings are still going on!')
+            pass
+        super().closeEvent(event)
+    def export_batch_script(self):
+        """
+        Parameters:
+        filename (str):
+        """
+        options = QFileDialog.Options()
+        filename, _ = QFileDialog.getSaveFileName(self,
+                                                  "Save Fit Parameters",
+                                                  "spectral_fitting_script.py",
+                                                  "Python Files (*.py)",
+                                                  options=options)
+        if filename:
+            if not filename.endswith('.py'):
+                filename += '.py'
+        # roi_filename = os.path.join(os.path.dirname(filename), 'roi_save.p')
+        # if os.path.exists(roi_filename):
+        #     os.path.join(os.path.dirname(roi_filename),
+        #                  'T' + datetime.datetime.now().strftime("%H%M%S") + os.path.basename(roi_filename))
+        # with open(roi_filename, 'wb') as cfile:
+        #     if self.has_grid_rois:
+        #         dill.dump([self.grid_rois], cfile)
+        #     else:
+        #         dill.dump([self.rois[self.roi_group_idx]], cfile)
+        lines = ["import lmfit\n", "from pygsfit.pygsfit import App\n", "import dill\n"
+                 "from utils import gstools\n","fit_params = lmfit.Parameters()\n","from PyQt5.QtWidgets import QApplication\n",
+                 "import sys\n", "app = QApplication(sys.argv)\n","from numpy import *\n",
+                 "f_obj = App()\n", "f_obj.hide()\n\n"]
+        app_attributes_tbw = ['eoimg_fname', 'eoimg_time_seq', 'cur_frame_idx']
+        app_attributes = ['fit_params_nvarys', 'fit_kws','eoimg_fitsdata','tp_cal_factor',
+            'has_eovsamap', 'has_dspec', 'has_stokes','fit_method',
+            'has_bkg', 'has_grid_rois',
+            'data_freq_bound', 'tb_spec_bound', 'flx_spec_bound',
+            'fit_freq_bound', 'roi_freq_bound', 'spec_frac_err',
+            'roi_grid_size',
+             'nroi_current_group', 'current_roi_idx',
+            'number_grid_rois', 'pol_select_idx',
+            'spec_in_tb', 'is_calibrated_tp', 'pixelized_grid_rois'
+        ]
+        fit_function_dict = {'powerlaw':'gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc',
+                             'thermal f-f + gyrores':'gstools.GSCostFunctions.Ff_Gyroresonance_MinimizerOneSrc'}
+        for name, param in self.fit_params.items():
+            line = f"fit_params.add('{name}', value={param.value}, vary={param.vary}, min={param.min}, max={param.max})"
+            if param.expr is not None:
+                line += f", expr='{param.expr}'"
+            line += "\n\n"
+            lines.append(line)
+        # file names
+        for attr in app_attributes_tbw:
+            value = getattr(self, attr)
+            lines.append(f'f_obj.{attr} = {value!r}\n')
+        #file selection has to be done before setting the attrs
+        lines.append("f_obj.eoimg_files_seq_select_return()\n")
+        for attr in app_attributes:
+            value = getattr(self, attr)
+            lines.append(f'f_obj.{attr} = {value!r}\n')
+        lines.append("f_obj.fit_params = fit_params\n")
+        lines.append(f"f_obj.fit_function = {fit_function_dict[self.ele_dist]} \n")
+        #--------add lines to read rois save file
+        if self.has_grid_rois:
+            cur_roi_list = self.grid_rois
+        else:
+            cur_roi_list = self.rois[self.roi_group_idx]
+        serialized_rois = [self.serialize_roi(roi) for roi in cur_roi_list]
+        lines.append("serialized_rois = " + str(serialized_rois) + "\n")
+        lines.append("f_obj.roi_group_idx = 0\n")
+        lines.append("f_obj.has_rois = True\n")
+        lines.append("f_obj.savedata = True\n")
+        lines.append("f_obj.update_gui = False\n")
+        lines.append("f_obj.current_roi_idx = 0\n")
+        lines.append("f_obj.rois = [[]]\n")
+        lines.append("f_obj.add_pre_defined_roi(serialized_rois)\n")
+        lines.append("f_obj.pathBatchFitRes()\n")
+        lines.append("f_obj.rois_to_fits()\n")
+        lines.append("f_obj.completed_tasks = 0\n")
+        lines.append("f_obj.parallel_fitting()\n")
+        with open(filename, 'w') as file:
+            file.writelines(lines)
+
+        print(f"Fit parameters exported to {filename}")
+
+    def serialize_roi(self,roi):
+        if isinstance(roi, pg.RectROI):
+            position = roi.pos()  # This returns a Point-like object for position
+            size = roi.size()  # This returns a Point-like object where x and y represent width and height
+            return f"RectROI,{position.x()},{position.y()},{size.x()},{size.y()}"
+        elif isinstance(roi, pg.EllipseROI):
+            position = roi.pos()  # Same as above for position
+            size = roi.size()  # Same as above for size
+            return f"EllipseROI,{position.x()},{position.y()},{size.x()},{size.y()}"
+        elif isinstance(roi, pg.PolyLineROI):
+            points = ','.join(f"{handle['pos'].x()},{handle['pos'].y()}" for handle in roi.handles)
+            return f"PolyLineROI,{points}"
+        else:
+            raise ValueError("Unsupported ROI type")
+
+    def deserialize_roi(self,roi_string):
+        parts = roi_string.split(',')
+        roi_type = parts[0]
+
+        if roi_type == "RectROI":
+            x, y, width, height = map(float, parts[1:])
+            return pg.RectROI([x, y], [width, height])  # Adjust to match the constructor of your RectROI class
+        elif roi_type == "EllipseROI":
+            x, y, width, height = map(float, parts[1:])
+            return pg.EllipseROI([x, y], [width, height])  # Adjust to match the constructor of your EllipseROI class
+        elif roi_type == "PolyLineROI":
+            # Parse the points for PolyLineROI
+            point_pairs = parts[1:]
+            points = [QPointF(float(point_pairs[i]), float(point_pairs[i + 1])) for i in range(0, len(point_pairs), 2)]
+            return pg.PolyLineROI(points)  # Adjust to match the constructor of your PolyLineROI class
+        else:
+            raise ValueError("Unsupported ROI type")
+    # def set_roi_index(self, roi_idx):
+    #     self.current_roi_idx = roi_idx
+    def rois_to_fits(self):
+        arcsec_per_pixel = (self.meta['refmap'].meta['CDELT1'], self.meta['refmap'].meta['CDELT2'])
+        roi_map = np.zeros(self.pg_img_canvas.getImageItem().image.shape, dtype=np.int64)
+        #for index, roi in tqdm(enumerate(self.rois[0])):
+        if hasattr(self, 'pixelized_grid_rois'):
+            if len(self.pixelized_grid_rois) != len(self.rois[0]):
+                raise ValueError('pixelized_grid_rois and the rois[0] are not isogenous! Please contact Authors.')
+            for index, roi in tqdm(enumerate(self.pixelized_grid_rois), total=len(self.pixelized_grid_rois), desc="Processing ROIs"):
+                #print(roi)
+                roi_map[roi[0][0]:roi[0][0] + roi[1], roi[0][1]:roi[0][1] + roi[1]] = int(index + 1)
+        else:
+            for index, roi in tqdm(enumerate(self.rois[0]), total=len(self.rois[0]), desc="Processing ROIs"):
+                # Convert ROI position to pixels and calculate size in pixels
+                roi_pos_pixels = roiutils.convert_roi_pos_to_pixels(roi, self.meta['refmap'])
+                roi_size_pixels = roiutils.calculate_roi_size_in_pixels(roi, arcsec_per_pixel)
+
+
+
+                if isinstance(roi, pg.RectROI):
+                    roi_map[roi_pos_pixels[0]:roi_pos_pixels[0]+roi_size_pixels[0], roi_pos_pixels[1]:roi_pos_pixels[1]+roi_size_pixels[1]] = int(index+1)
+                elif isinstance(roi, pg.EllipseROI):
+                    for i in range(roi_pos_pixels[0],roi_pos_pixels[0]+roi_size_pixels[0]):
+                        for j in range(roi_pos_pixels[1],roi_pos_pixels[1]+roi_size_pixels[1]):
+                        # Ellipse equation for the mask
+                            if ((j - roi_pos_pixels[0]) ** 2 / roi_size_pixels[0] ** 2 + (i - roi_pos_pixels[1]) ** 2 /
+                            roi_size_pixels[1] ** 2) <= 1:
+                                if roi_map[i, j] == 0:  # Check for no overlap
+                                    roi_map[i, j] = index + 1
+                else:
+                    raise ValueError('Polygon not yet implemented')
+
+        # Save the map as a FITS file
+        filename  = os.path.join(self.batch_fitting_dir, 'roi_map0-{}.fits'.format(len(self.rois[0])-1))
+        if os.path.exists(filename):
+            raise ValueError('rois map exists!')
+        with fits.open(self.eoimg_fname) as hdul:
+            # Extract the header from the primary HDU
+            header = hdul[0].header
+        hdu = fits.PrimaryHDU(data=roi_map, header=header)
+        hdul = fits.HDUList([hdu])
+        hdul.writeto(filename, overwrite=True)
+        #fits.writeto(filename, roi_map,header=self.meta, overwrite=True)
+
+
+
+    def combine_hdf5_files(self, final_path, original_files):
+        with h5py.File(final_path, 'w') as hf_combined:
+            index_dataset = []
+
+            for i, file_path in enumerate(original_files):
+                with h5py.File(file_path, 'r') as hf:
+                    # Create a unique group for this file
+                    group_name = f"file_{i}"
+                    group = hf_combined.create_group(group_name)
+
+                    # Copy the entire content of the file into this new group
+                    for key in hf.keys():
+                        hf.copy(hf[key], group)
+
+                    # Append file information to index_dataset
+                    index_dataset.append((file_path, i))
+
+            # Optionally, create a dataset for file indices
+            hf_combined.create_dataset('file_indices', data=index_dataset)
+
+    def combine_fits_files(self, final_path, original_files):
+        with fits.HDUList() as hdul_combined:
+            for file in original_files:
+                with fits.open(file) as hdul:
+                    for hdu in hdul:
+                        # Make a copy of the HDU
+                        hdu_copy = hdu.copy()
+
+                        # Rename the HDU to avoid conflicts and make identification easier
+                        hdu_copy.name = os.path.basename(file).upper().replace('.FITS', '') + "_" + hdu_copy.name
+
+                        # Append the copied HDU to the combined HDU list
+                        hdul_combined.append(hdu_copy)
+
+            # Write the combined HDU list to a new file
+            hdul_combined.writeto(final_path, overwrite=True)
+
+class fileSeqDialog(QWidget):
+    dialog_completed = pyqtSignal(bool, int, int)
+    def __init__(self, n_files, parent=None):
+        super().__init__(parent)
+
+        # Layout
+        layout = QVBoxLayout()
+        # Add widgets
+        self.label = QLabel("{} files are detected in this sequence, do you want to make a image seq?\nDefine the range here:".format(n_files))
+        self.input1 = QLineEdit(self)
+        self.input1.setText(str(0))
+        self.input2 = QLineEdit(self)
+        self.input2.setText(str(n_files-1))
+
+        self.yesButton = QPushButton("Yes", self)
+        self.noButton = QPushButton("No", self)
+
+        layout.addWidget(self.label)
+        layout.addWidget(self.input1)
+        layout.addWidget(self.input2)
+        layout.addWidget(self.yesButton)
+        layout.addWidget(self.noButton)
+
+        self.setLayout(layout)
+
+        # Connect buttons to functions
+        self.yesButton.clicked.connect(self.on_yes)
+        self.noButton.clicked.connect(self.on_no)
+
+    def on_yes(self):
+        value1 = self.input1.text()
+        value2 = self.input2.text()
+
+        if not value1 or not value2:
+            self.warningLabel.setText("Please fill in both fields.")
+            return
+
+        self.dialog_completed.emit(True, int(value1), int(value2))
+        self.close()
+    def on_no(self):
+        self.dialog_completed.emit(False, 0, 0)
+        self.close()
 
 
 if __name__ == '__main__':
