@@ -6,6 +6,7 @@ import ctypes
 from numpy.ctypeslib import ndpointer
 from scipy import interpolate
 import warnings
+from PyQt5.QtCore import QThread, pyqtSignal, QRunnable,QObject
 warnings.simplefilter("default")
 
 def initGET_MW(libname):
@@ -288,4 +289,36 @@ class GSCostFunctions:
                 return mflux - spec
             # Return scaled residual
             return (mflux - spec) / spec_err
+
+class FitThread(QThread):
+    finished = pyqtSignal(object)
+    def __init__(self, main_window, roi_index):
+        super().__init__()
+        self.main_window = main_window
+        self.current_roi_idx = roi_index
+        self.finished.connect(self.deleteLater)
+    def run(self):
+        self.main_window.current_roi_idx = self.current_roi_idx
+        self.main_window.calc_roi_spec(None)
+        self.main_window.update_fitmask()
+        result = self.main_window.do_spec_fit()
+        self.finished.emit(result)
+
+class FitTaskSignals(QObject):
+    # Signal to indicate task completion
+    completed = pyqtSignal()
+
+class FitTask(QRunnable):
+    def __init__(self, main_window, roi_index):
+        super().__init__()
+        self.main_window = main_window
+        self.current_roi_idx = roi_index
+        #self.signals = FitTaskSignals()
+        #self.signals = pyqtSignal()
+
+    def run(self):
+        #self.main_window.current_roi_idx = self.current_roi_idx
+        self.main_window.do_spec_fit(local_roi_idx=self.current_roi_idx)
+        #self.signals.completed.emit()
+        #self.completed.emit()
 
