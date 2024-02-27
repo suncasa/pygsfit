@@ -55,12 +55,12 @@ def sfu2tb(frequency, flux, area=None, size=None, square=True, reverse=False, ve
         else:
             flux = flux * sfu
 
-    if area:
+    if area is not None:
         if not hasattr(area, 'unit'):
             # assume area is in arcsec^2
             area = area * u.arcsec ** 2
 
-    if size and (not area):
+    if size is not None and (area is None):
         if type(size) != list:
             size = [size]
 

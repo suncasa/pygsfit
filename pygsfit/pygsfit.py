@@ -27,11 +27,11 @@ from tqdm import *
 import multiprocessing
 import tempfile
 import glob
-import re
-import time
-from astropy.coordinates import SkyCoord
-import datetime
-import dill
+# import re
+# import time
+# from astropy.coordinates import SkyCoord
+# import datetime
+# import dill
 
 
 filedir = os.path.dirname(os.path.realpath(__file__))
