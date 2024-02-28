@@ -10,6 +10,8 @@ Welcome to pygsfit's documentation!
    :maxdepth: 2
    :caption: Contents:
 
+   Tutorial
+
 
 
 Indices and tables
