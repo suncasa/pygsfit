@@ -27,11 +27,11 @@ from tqdm import *
 import multiprocessing
 import tempfile
 import glob
-import re
-import time
-from astropy.coordinates import SkyCoord
-import datetime
-import dill
+# import re
+# import time
+# from astropy.coordinates import SkyCoord
+# import datetime
+# import dill
 
 
 filedir = os.path.dirname(os.path.realpath(__file__))
@@ -133,6 +133,7 @@ class App(QMainWindow):
         self.nroi_current_group = 0
         self.current_roi_idx = 0
         self.number_grid_rois = 0
+        self.pixelized_grid_rois = None
         self.distSpecCanvasSet = {}
         self.pol_select_idx = 0
         self.spec_in_tb = True
@@ -1046,6 +1047,7 @@ class App(QMainWindow):
         self.update_pgspec()
 
     def plot_qlookmap(self):
+        from utils.img_utils import submap_of_file1, resize_array
         #todo qlook is totally messed up at this moment, will be fixed soon.
         """Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map"""
         # Plot a quicklook map
@@ -1093,23 +1095,32 @@ class App(QMainWindow):
             #ax0 = self.update_axes_projection(ax0, projection=aiamap)
             #blbl = self.meta['refmap'].bottom_left_coord
             #submap_aia = aiamap.submap(bottom_left=self.meta['refmap'].bottom_left_coord, top_right=self.meta['refmap'].top_right_coord)
-            ax0 = self.update_axes_projection(ax0, projection=aiamap)
-            aiamap.plot(axes=ax0, cmap=aiacmap, clip_interval=(1, 99.99) * u.percent)
+            if self.has_eovsamap:
+                submap_aia = submap_of_file1(self.aiafname, self.meta['refmap'])
+            else:
+                submap_aia = aiamap
+            ax0 = self.update_axes_projection(ax0, projection=submap_aia)
+            bounds = ax0.axis()
+            submap_aia.plot(axes=ax0, cmap=aiacmap, clip_interval=(1, 99.99) * u.percent)
             ax0.set_title('')
             aia_tit_str = 'AIA {0:.0f} at {1:s}'.format(aiamap.wavelength.value, aiamap.date.isot[:19])
             ax0.text(0.02, 0.98, aia_tit_str, ha='left', va='top', transform=ax0.transAxes, fontsize=10)
-        if self.has_eovsamap:
-            if not self.has_aiamap:
-                ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
+        else:
+            ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
             bounds = ax0.axis()
+        if self.has_eovsamap:
             for s, sp in enumerate(self.cfreqs):
                 #data = self.data[self.pol_select_idx, s, ...]
                 data = self.data[self.pol_select_idx, self.cur_frame_idx, s, ...]
                 cur_sunmap = smap.Map(data, self.meta['refmap'].meta)
                 clvls = self.clevels * np.nanmax(data) * u.K
                 rcmap = [icmap(self.freq_dist(self.cfreqs[s]))] * len(clvls)
-                #if not self.has_aiamap:
-                cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
+                if not self.has_aiamap:
+                    cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
+                    print(sp, clvls, np.max(cur_sunmap.data))
+                else:
+                    stdata1 = resize_array(data, submap_aia.data.shape)
+                    ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
                 #else:
                 #    submap_eovsa = cur_sunmap.submap(bottom_left=aiamap.bottom_left_coord,
                 #                           top_right=aiamap.top_right_coord)
@@ -1118,8 +1129,7 @@ class App(QMainWindow):
                 # if not self.opencontour:
                 #     continue
                 #     # todo
-            if self.has_aiamap:
-                ax0.axis(bounds)
+            #ax0.axis(bounds)
 
         # ax0.set_xlim([-1200, 1200])
         # ax0.set_ylim([-1200, 1200])
@@ -2893,7 +2903,7 @@ class App(QMainWindow):
         arcsec_per_pixel = (self.meta['refmap'].meta['CDELT1'], self.meta['refmap'].meta['CDELT2'])
         roi_map = np.zeros(self.pg_img_canvas.getImageItem().image.shape, dtype=np.int64)
         #for index, roi in tqdm(enumerate(self.rois[0])):
-        if hasattr(self, 'pixelized_grid_rois'):
+        if hasattr(self, 'pixelized_grid_rois') and self.pixelized_grid_rois is not None:
             if len(self.pixelized_grid_rois) != len(self.rois[0]):
                 raise ValueError('pixelized_grid_rois and the rois[0] are not isogenous! Please contact Authors.')
             for index, roi in tqdm(enumerate(self.pixelized_grid_rois), total=len(self.pixelized_grid_rois), desc="Processing ROIs"):
