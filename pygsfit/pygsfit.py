@@ -980,6 +980,7 @@ class App(QMainWindow):
         self.eoimg_fitsdata = None
         try:
             hdu = fits.open(self.aiafname)
+            self.has_aiamap = True
             # self.infoEdit.setPlainText(repr(hdu[1].header))
         except:
             self.statusBar.showMessage('Filename is not a valid FITS file', 2000)
@@ -1051,50 +1052,16 @@ class App(QMainWindow):
         #todo qlook is totally messed up at this moment, will be fixed soon.
         """Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map"""
         # Plot a quicklook map
-        # self.qlook_ax.clear()
         ax0 = self.qlookimg_axs[0]
-
-        if self.has_eovsamap:
-            ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
-            nspw = self.meta['nfreq']
-            self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
-                                                self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
-            eotimestr = eoimg_date.isot[:-4]
-            rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
-            solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
-            ax0.add_patch(solar_limb)
-            rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
-                                     color='k', alpha=0.7, lw=1, fill=False)
-            ax0.add_patch(rect)
-            icmap = plt.get_cmap('RdYlBu')
-
-            self.qlookimg_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
-        else:
-            self.statusBar.showMessage('EOVSA FITS file does not exist', 2000)
-            self.eoimg_fname = '<Select or enter a valid fits filename>'
-            # self.eoimg_fitsentry.setText(self.eoimg_fname)
-            # self.infoEdit.setPlainText('')
-            self.has_eovsamap = False
-
-        if os.path.exists(self.aiafname):
-            try:
-                #aiamap = sunpy.map.Map(sunpy.data.sample.SWAP_LEVEL1_IMAGE)
-                aiamap = smap.Map(self.aiafname)
-                self.has_aiamap = True
-            except:
-                self.statusBar.showMessage('Something is wrong with the provided AIA FITS file', 2000)
-        else:
-            self.statusBar.showMessage('AIA FITS file does not exist', 2000)
-            self.aiafname = '<Select or enter a valid fits filename>'
-            # self.aiaimg_fitsentry.setText(self.aiafname)
-            # self.infoEdit.setPlainText('')
-            self.has_aiamap = False
-        cts = []
         if self.has_aiamap:
+            if os.path.exists(self.aiafname):
+                try:
+                    aiamap = smap.Map(self.aiafname)
+                    #self.has_aiamap = True
+                except:
+                    self.statusBar.showMessage('Something is wrong with the provided AIA FITS file', 2000)
+                    self.has_aiamap = False
             aiacmap = plt.get_cmap('gray_r')
-            #ax0 = self.update_axes_projection(ax0, projection=aiamap)
-            #blbl = self.meta['refmap'].bottom_left_coord
-            #submap_aia = aiamap.submap(bottom_left=self.meta['refmap'].bottom_left_coord, top_right=self.meta['refmap'].top_right_coord)
             if self.has_eovsamap:
                 submap_aia = submap_of_file1(self.aiafname, self.meta['refmap'])
             else:
@@ -1107,8 +1074,18 @@ class App(QMainWindow):
             ax0.text(0.02, 0.98, aia_tit_str, ha='left', va='top', transform=ax0.transAxes, fontsize=10)
         else:
             ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
-            bounds = ax0.axis()
         if self.has_eovsamap:
+            nspw = self.meta['nfreq']
+            self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
+                                                self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
+            eotimestr = eoimg_date.isot[:-4]
+            #rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
+            #solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
+            #ax0.add_patch(solar_limb)
+            #rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
+            #                         color='k', alpha=0.7, lw=1, fill=False)
+            #ax0.add_patch(rect)
+            icmap = plt.get_cmap('RdYlBu')
             for s, sp in enumerate(self.cfreqs):
                 #data = self.data[self.pol_select_idx, s, ...]
                 data = self.data[self.pol_select_idx, self.cur_frame_idx, s, ...]
@@ -1117,30 +1094,15 @@ class App(QMainWindow):
                 rcmap = [icmap(self.freq_dist(self.cfreqs[s]))] * len(clvls)
                 if not self.has_aiamap:
                     cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
-                    print(sp, clvls, np.max(cur_sunmap.data))
                 else:
-                    stdata1 = resize_array(data, submap_aia.data.shape)
-                    ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
-                #else:
-                #    submap_eovsa = cur_sunmap.submap(bottom_left=aiamap.bottom_left_coord,
-                #                           top_right=aiamap.top_right_coord)
-                #    submap_eovsa.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
-                #cts.append(cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha))
-                # if not self.opencontour:
-                #     continue
-                #     # todo
-            #ax0.axis(bounds)
-
-        # ax0.set_xlim([-1200, 1200])
-        # ax0.set_ylim([-1200, 1200])
+                   stdata1 = resize_array(data, submap_aia.data.shape)
+                   ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
+            self.qlookimg_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
         ax0.set_xlabel('Solar X [arcsec]')
         ax0.set_ylabel('Solar Y [arcsec]')
-        # ax0.set_title('')
         ax0.set_aspect('equal')
-        # self.qlookimg_canvas.figure.subplots_adjust(left=0.10, right=0.95,
-        #                                        bottom=0.10, top=0.95,
-        #                                        hspace=0, wspace=0.35)
         self.qlookimg_canvas.draw()
+
 
     def plot_dspec(self, cmap='viridis', vmin=None, vmax=None):
         from matplotlib import dates as mdates

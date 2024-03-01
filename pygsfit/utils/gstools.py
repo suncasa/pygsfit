@@ -142,8 +142,11 @@ class GSCostFunctions:
                     (scaled) residual for each input frequency
         """
         if platform.system() == 'Linux' or platform.system() == 'Darwin':
+            cur_lib_flie = '../binaries/MWTransferArr.so'
+            if platform.machine() == 'arm64':
+                cur_lib_flie = '../binaries/MWTransferArr_arm64.so'
             libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   '../binaries/MWTransferArr.so')
+                                   cur_lib_flie)
         if platform.system() == 'Windows': ##TODO: not yet tested on Windows platform
             libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                    '../binaries/MWTransferArr64.dll')
