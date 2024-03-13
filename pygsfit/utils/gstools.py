@@ -325,3 +325,85 @@ class FitTask(QRunnable):
         #self.signals.completed.emit()
         #self.completed.emit()
 
+
+def array_lmfit_convert_param(params, keyword, par_value=None, to_array=True):
+    """
+    Convert parameter attributes between lmfit.Parameter object and numpy array.
+
+    :param params: lmfit.Parameters object containing the fitting parameters.
+    :param keyword: The name of the parameter to convert or update.
+    :param array: A numpy array containing the new value, minimum, and maximum of the parameter.
+                  This parameter is ignored if to_array is True.
+    :param to_array: Boolean flag determining the operation mode. If True, converts parameter
+                     attributes to a numpy array. If False, updates parameter attributes from the array.
+    :return: A numpy array containing the value, minimum, and maximum of the parameter if to_array is True.
+             None if to_array is False and the operation is to update the parameter from the array.
+    """
+    if to_array:
+        # Convert parameter to array
+        if keyword in params:
+            param = params[keyword]
+            return np.array([param.value, param.min, param.max])
+        else:
+            raise ValueError(f"Parameter '{keyword}' not found in the provided lmfit.Parameters object.")
+    else:
+        # Update parameter from array
+        if keyword in params:
+            if par_value is not None:
+                if 'log' in keyword:
+                    params[keyword].value = np.log10(par_value)
+                elif keyword == 'Bx100G':
+                    params[keyword].value = par_value/100.
+                else:
+                    params[keyword].value = par_value
+            else:
+                raise ValueError("The provided array must be a three-element numpy array.")
+        else:
+            raise ValueError(f"Parameter '{keyword}' not found in the provided lmfit.Parameters object.")
+
+def pyWrapper_Fit_Spectrum_Kl(ninput, rinput, parguess, freq, spec_in):
+    """
+    A python wrapper to call  Dr.Fleishman's Fortran code: fit_Spectrum_Kl.for/fit_Spectrum_Kl.so, all the input should be
+    numpy array with dtype='float64', order='F', txt files can be created by calling get_Table().
+    :param ninput: np.array([7, 0, 1, 30, 1, 1], dtype='int32'), 30 here will be replace by n_freq later. See Long_input.txt
+    :param rinput: see real_input.txt, for example: np.array([0.17, 1e-6, 1.0, 4.0, 8.0, 0.015], dtype='float64')
+    :param parguess: Input parameters ([guess, min, max]*15), see Parms_input.txt
+    :param freq: freqs in GHz, example:    freq = np.array([3.42, 3.92, 4.42,.......], dtype='float64', order='F')
+    :param spec_in: spectrum/uncertainty to be fitted, (1, n_freq, 4), spectrum:[0,:,0], uncertainty:[0,:,2]
+    :return:fitted spectrum, parameters and corresponding uncerntainties.
+    """
+    # find the lib
+    if platform.system() == 'Linux' or platform.system() == 'Darwin':
+        cur_lib_flie = './binaries/fit_Spectrum_Kl.so'
+        if platform.machine() == 'arm64':
+            cur_lib_flie = './binaries/fit_Spectrum_Kl_arm64.so'
+        libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                               cur_lib_flie)
+    if platform.system() == 'Windows':  ##TODO: not yet tested on Windows platform
+        libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                               './binaries/XXX.dll')
+    #orgnize the input args
+    n_freq = len(freq)
+    ninput[3] = np.int32(n_freq)
+    #create the output holder
+    spec_out = np.zeros((1, n_freq, 2), dtype='float64', order='F')
+    aparms = np.zeros((1, 8), dtype='float64', order='F')
+    eparms = np.zeros((1, 8), dtype='float64', order='F')
+
+    #prepare the pointer of the i/o array
+    inp_arrays = [ninput, rinput, parguess, freq, spec_in, aparms, eparms, spec_out]
+    ct_pointers = [arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)) for arr in inp_arrays]
+    ninput_ct, rinput_ct, parguess_ct, freq_ct, spec_in_ct, aparms_ct, eparms_ct, spec_out_ct = ct_pointers
+    argv = (ctypes.POINTER(ctypes.c_double) * 8)(ninput_ct, rinput_ct, parguess_ct, freq_ct, spec_in_ct, aparms_ct,
+                                                 eparms_ct, spec_out_ct)
+
+    libc_mw = ctypes.CDLL(cur_lib_flie)
+    mwfunc = libc_mw.get_mw_fit_
+
+    res = mwfunc(ctypes.c_longlong(8), argv)
+    return (spec_out, aparms, eparms)
+
+class fakeMiniResClass:
+    #pretent to be lmfit.minimizerResult for 'Dr.Fleishman' method
+    def __init__(self, params):
+        self.params = params

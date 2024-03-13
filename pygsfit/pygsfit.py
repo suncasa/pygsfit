@@ -27,6 +27,7 @@ from tqdm import *
 import multiprocessing
 import tempfile
 import glob
+from scipy.interpolate import interp1d
 # import re
 # import time
 # from astropy.coordinates import SkyCoord
@@ -736,7 +737,7 @@ class App(QMainWindow):
         # Group 2: Fit Method
         self.fit_method_box = QHBoxLayout()
         self.fit_method_selector_widget = QComboBox()
-        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc"])
+        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc", "Dr.Fleishman"])
         self.fit_method_selector_widget.currentIndexChanged.connect(self.fit_method_selector)
         self.fit_method_box.addWidget(QLabel("Fit Method"))
         self.fit_method_box.addWidget(self.fit_method_selector_widget)
@@ -795,11 +796,14 @@ class App(QMainWindow):
                                                                      './', 'FITS Images (*.fits *.fit *.ft *.fts)')
         self.data_in_seq = len(tmp_eoimg_fname_seq) > 1
         self.eoimg_time_seq = tmp_eoimg_fname_seq
-        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
-        self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
-        self.cur_frame_idx = 0
-        self.eoimg_files_seq_select_return()
-        print('{} files are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
+        if not len(self.eoimg_time_seq)==0:
+            self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
+            self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
+            self.cur_frame_idx = 0
+            self.eoimg_files_seq_select_return()
+            print('{} files are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
+        else:
+            print('No file is selected')
         
         # self.eoimg_fname = 'EOVSA_20210507T190135.000000.outim.image.allbd.fits'
         ## quick input for debug -------------
@@ -2099,6 +2103,8 @@ class App(QMainWindow):
         self.fit_method = self.fit_method_selector_widget.currentText()
         self.init_fit_kws()
         self.update_fit_kws_widgets()
+        if self.fit_method == 'Dr.Fleishman':
+            self.fit_Spectrum_Kl_call_preset()
 
     def ele_function_selector(self):
         print("Selected Electron Distribution Function is: {}".format(self.ele_function_selector_widget.currentText()))
@@ -2390,6 +2396,28 @@ class App(QMainWindow):
                 self.speccanvas.removeItem(self.spec_fitplot)
         if self.fit_function != gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
             print("Not yet implemented")
+        elif self.fit_method == 'Dr.Fleishman':
+            #using Dr.Fleishman's code which combine the minimization
+            exported_fittig_info = []
+            self.fit_Spectrum_Kl_input_converter()
+            self.fit_Spectrum_Kl_output = gstools.pyWrapper_Fit_Spectrum_Kl(*self.fit_Spectrum_Kl_input)
+            self.fit_Spectrum_Kl_output_converter()
+            mi = gstools.fakeMiniResClass(params=self.fit_params_res)
+            exported_fittig_info.append(mi)
+            print('==========Fit Parameters Updated=======')
+            if self.update_gui:
+                #self.fit_params_res = mi.params
+                for n, key in enumerate(self.fit_params_res):
+                    self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+            ori_spec_fit_res = np.sum(self.fit_Spectrum_Kl_output[0][0,:,:], axis=1)
+            freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+            spec_interpolator = interp1d(self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed(),
+                                         ori_spec_fit_res, kind='linear', fill_value='extrapolate')
+            spec_fit_res = spec_interpolator(freqghz_toplot)
+            self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                     pen=dict(color=pg.mkColor(local_roi_idx), width=4),
+                                                     symbol=None, symbolBrush=None)
+            self.speccanvas.addItem(self.spec_fitplot)
         else:
             exported_fittig_info = []
             if self.fit_method != 'mcmc':
@@ -2942,6 +2970,61 @@ class App(QMainWindow):
 
             # Write the combined HDU list to a new file
             hdul_combined.writeto(final_path, overwrite=True)
+
+    def fit_Spectrum_Kl_input_converter(self):
+        #convert the parameters read from the app to the input of fitting func in the fit_Spectrum_Kl code
+        # Long_input:
+        fitted_freq = self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed()
+        ninput = np.array([7, 0, 1, len(fitted_freq), 1, 1], dtype='int32') # at this moment, all the 7 parms are opened.
+        # freq
+        freq = fitted_freq.astype(np.float64)
+        #spec_in
+        spec_in = np.zeros((1, len(freq), 4), dtype='float64', order='F')
+        spec_in[0, :, 0] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_tofit.compressed()
+        spec_in[0, :, 2] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_err_tofit.compressed()
+        #Real_input
+        rinput = np.array([0.17, 1e-6, 1.0, #SIMPLEX Step, SIMPLEX accuracy, Flux threshold to be fitted [sfu*GHz]
+                           self.rois[self.roi_group_idx][self.current_roi_idx].total_area,
+                           self.fit_params['depth_asec'].value,
+                           self.fit_params['Emin_keV'].value/1.e3], dtype='float64')
+        parguess = np.zeros((15, 3), dtype='float64', order='F')
+        for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
+            cur_arr = gstools.array_lmfit_convert_param(self.fit_params, ckeyword)
+            if ckeyword=='log_nnth': # 1d7 cm^-3
+                cur_arr = 10**cur_arr/1.e7
+            if ckeyword=='log_nth': #1d9 cm^-3
+                cur_arr = 10**cur_arr/1.e9
+            parguess[parm_idx,:] = cur_arr.astype(np.float64)
+            parguess[7:,:] = np.tile(np.array([5.0, 0.2, 20.0], dtype='float64'), (8, 1)) # not used
+        self.fit_Spectrum_Kl_input=(ninput, rinput, parguess, freq, spec_in)
+
+    def fit_Spectrum_Kl_output_converter(self):
+        #convert the output of fit_Spectrum_Kl code res then import to the app
+        if not hasattr(self, 'fit_Spectrum_Kl_output'):
+            raise ValueError('fit_Spectrum_Kl is not performed yet!')
+        self.fit_params_res = copy.deepcopy(self.fit_params)
+        for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
+            gstools.array_lmfit_convert_param(self.fit_params_res, ckeyword, par_value=self.fit_Spectrum_Kl_output[1][0][parm_idx], to_array=False)
+
+
+    def fit_Spectrum_Kl_call_preset(self):
+        # The calling of fit_Spectrum_Kl code follow its own convention, prepare the GUI display and the parameters for it.
+
+        # e- dist will be changed to 'pwl'
+        self.ele_function_selector_widget
+        pwl_index = self.ele_function_selector_widget.findText('powerlaw')
+        if pwl_index >= 0:
+            self.ele_function_selector_widget.setCurrentIndex(pwl_index)
+        self.ele_function_selector()
+        # 7 params will be opened.
+        for key in self.fit_params:
+            self.fit_params[key].vary = key in ['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']
+        self.fit_params_nvarys = 7
+        self.update_fit_param_widgets()
+        # switch to the flux density mode:
+        self.plot_tb_button.setChecked(False)
+        self.plot_flx_button.setChecked(True)
+        self.tb_flx_btnstate()
 
 class fileSeqDialog(QWidget):
     dialog_completed = pyqtSignal(bool, int, int)
