@@ -27,6 +27,7 @@ from tqdm import *
 import multiprocessing
 import tempfile
 import glob
+from scipy.interpolate import interp1d
 # import re
 # import time
 # from astropy.coordinates import SkyCoord
@@ -736,7 +737,7 @@ class App(QMainWindow):
         # Group 2: Fit Method
         self.fit_method_box = QHBoxLayout()
         self.fit_method_selector_widget = QComboBox()
-        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc"])
+        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc", "Dr.Fleishman"])
         self.fit_method_selector_widget.currentIndexChanged.connect(self.fit_method_selector)
         self.fit_method_box.addWidget(QLabel("Fit Method"))
         self.fit_method_box.addWidget(self.fit_method_selector_widget)
@@ -795,11 +796,14 @@ class App(QMainWindow):
                                                                      './', 'FITS Images (*.fits *.fit *.ft *.fts)')
         self.data_in_seq = len(tmp_eoimg_fname_seq) > 1
         self.eoimg_time_seq = tmp_eoimg_fname_seq
-        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
-        self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
-        self.cur_frame_idx = 0
-        self.eoimg_files_seq_select_return()
-        print('{} files are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
+        if not len(self.eoimg_time_seq)==0:
+            self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
+            self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
+            self.cur_frame_idx = 0
+            self.eoimg_files_seq_select_return()
+            print('{} files are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
+        else:
+            print('No file is selected')
         
         # self.eoimg_fname = 'EOVSA_20210507T190135.000000.outim.image.allbd.fits'
         ## quick input for debug -------------
@@ -980,6 +984,7 @@ class App(QMainWindow):
         self.eoimg_fitsdata = None
         try:
             hdu = fits.open(self.aiafname)
+            self.has_aiamap = True
             # self.infoEdit.setPlainText(repr(hdu[1].header))
         except:
             self.statusBar.showMessage('Filename is not a valid FITS file', 2000)
@@ -1051,50 +1056,16 @@ class App(QMainWindow):
         #todo qlook is totally messed up at this moment, will be fixed soon.
         """Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map"""
         # Plot a quicklook map
-        # self.qlook_ax.clear()
         ax0 = self.qlookimg_axs[0]
-
-        if self.has_eovsamap:
-            ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
-            nspw = self.meta['nfreq']
-            self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
-                                                self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
-            eotimestr = eoimg_date.isot[:-4]
-            rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
-            solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
-            ax0.add_patch(solar_limb)
-            rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
-                                     color='k', alpha=0.7, lw=1, fill=False)
-            ax0.add_patch(rect)
-            icmap = plt.get_cmap('RdYlBu')
-
-            self.qlookimg_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
-        else:
-            self.statusBar.showMessage('EOVSA FITS file does not exist', 2000)
-            self.eoimg_fname = '<Select or enter a valid fits filename>'
-            # self.eoimg_fitsentry.setText(self.eoimg_fname)
-            # self.infoEdit.setPlainText('')
-            self.has_eovsamap = False
-
-        if os.path.exists(self.aiafname):
-            try:
-                #aiamap = sunpy.map.Map(sunpy.data.sample.SWAP_LEVEL1_IMAGE)
-                aiamap = smap.Map(self.aiafname)
-                self.has_aiamap = True
-            except:
-                self.statusBar.showMessage('Something is wrong with the provided AIA FITS file', 2000)
-        else:
-            self.statusBar.showMessage('AIA FITS file does not exist', 2000)
-            self.aiafname = '<Select or enter a valid fits filename>'
-            # self.aiaimg_fitsentry.setText(self.aiafname)
-            # self.infoEdit.setPlainText('')
-            self.has_aiamap = False
-        cts = []
         if self.has_aiamap:
+            if os.path.exists(self.aiafname):
+                try:
+                    aiamap = smap.Map(self.aiafname)
+                    #self.has_aiamap = True
+                except:
+                    self.statusBar.showMessage('Something is wrong with the provided AIA FITS file', 2000)
+                    self.has_aiamap = False
             aiacmap = plt.get_cmap('gray_r')
-            #ax0 = self.update_axes_projection(ax0, projection=aiamap)
-            #blbl = self.meta['refmap'].bottom_left_coord
-            #submap_aia = aiamap.submap(bottom_left=self.meta['refmap'].bottom_left_coord, top_right=self.meta['refmap'].top_right_coord)
             if self.has_eovsamap:
                 submap_aia = submap_of_file1(self.aiafname, self.meta['refmap'])
             else:
@@ -1107,8 +1078,18 @@ class App(QMainWindow):
             ax0.text(0.02, 0.98, aia_tit_str, ha='left', va='top', transform=ax0.transAxes, fontsize=10)
         else:
             ax0 = self.update_axes_projection(ax0, projection=self.meta['refmap'])
-            bounds = ax0.axis()
         if self.has_eovsamap:
+            nspw = self.meta['nfreq']
+            self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
+                                                self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
+            eotimestr = eoimg_date.isot[:-4]
+            #rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
+            #solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
+            #ax0.add_patch(solar_limb)
+            #rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
+            #                         color='k', alpha=0.7, lw=1, fill=False)
+            #ax0.add_patch(rect)
+            icmap = plt.get_cmap('RdYlBu')
             for s, sp in enumerate(self.cfreqs):
                 #data = self.data[self.pol_select_idx, s, ...]
                 data = self.data[self.pol_select_idx, self.cur_frame_idx, s, ...]
@@ -1117,30 +1098,15 @@ class App(QMainWindow):
                 rcmap = [icmap(self.freq_dist(self.cfreqs[s]))] * len(clvls)
                 if not self.has_aiamap:
                     cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
-                    print(sp, clvls, np.max(cur_sunmap.data))
                 else:
-                    stdata1 = resize_array(data, submap_aia.data.shape)
-                    ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
-                #else:
-                #    submap_eovsa = cur_sunmap.submap(bottom_left=aiamap.bottom_left_coord,
-                #                           top_right=aiamap.top_right_coord)
-                #    submap_eovsa.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
-                #cts.append(cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha))
-                # if not self.opencontour:
-                #     continue
-                #     # todo
-            #ax0.axis(bounds)
-
-        # ax0.set_xlim([-1200, 1200])
-        # ax0.set_ylim([-1200, 1200])
+                   stdata1 = resize_array(data, submap_aia.data.shape)
+                   ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
+            self.qlookimg_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
         ax0.set_xlabel('Solar X [arcsec]')
         ax0.set_ylabel('Solar Y [arcsec]')
-        # ax0.set_title('')
         ax0.set_aspect('equal')
-        # self.qlookimg_canvas.figure.subplots_adjust(left=0.10, right=0.95,
-        #                                        bottom=0.10, top=0.95,
-        #                                        hspace=0, wspace=0.35)
         self.qlookimg_canvas.draw()
+
 
     def plot_dspec(self, cmap='viridis', vmin=None, vmax=None):
         from matplotlib import dates as mdates
@@ -2137,6 +2103,8 @@ class App(QMainWindow):
         self.fit_method = self.fit_method_selector_widget.currentText()
         self.init_fit_kws()
         self.update_fit_kws_widgets()
+        if self.fit_method == 'Dr.Fleishman':
+            self.fit_Spectrum_Kl_call_preset()
 
     def ele_function_selector(self):
         print("Selected Electron Distribution Function is: {}".format(self.ele_function_selector_widget.currentText()))
@@ -2428,6 +2396,28 @@ class App(QMainWindow):
                 self.speccanvas.removeItem(self.spec_fitplot)
         if self.fit_function != gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc:
             print("Not yet implemented")
+        elif self.fit_method == 'Dr.Fleishman':
+            #using Dr.Fleishman's code which combine the minimization
+            exported_fittig_info = []
+            self.fit_Spectrum_Kl_input_converter()
+            self.fit_Spectrum_Kl_output = gstools.pyWrapper_Fit_Spectrum_Kl(*self.fit_Spectrum_Kl_input)
+            self.fit_Spectrum_Kl_output_converter()
+            mi = gstools.fakeMiniResClass(params=self.fit_params_res)
+            exported_fittig_info.append(mi)
+            print('==========Fit Parameters Updated=======')
+            if self.update_gui:
+                #self.fit_params_res = mi.params
+                for n, key in enumerate(self.fit_params_res):
+                    self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+            ori_spec_fit_res = np.sum(self.fit_Spectrum_Kl_output[0][0,:,:], axis=1)
+            freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+            spec_interpolator = interp1d(self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed(),
+                                         ori_spec_fit_res, kind='linear', fill_value='extrapolate')
+            spec_fit_res = spec_interpolator(freqghz_toplot)
+            self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
+                                                     pen=dict(color=pg.mkColor(local_roi_idx), width=4),
+                                                     symbol=None, symbolBrush=None)
+            self.speccanvas.addItem(self.spec_fitplot)
         else:
             exported_fittig_info = []
             if self.fit_method != 'mcmc':
@@ -2980,6 +2970,61 @@ class App(QMainWindow):
 
             # Write the combined HDU list to a new file
             hdul_combined.writeto(final_path, overwrite=True)
+
+    def fit_Spectrum_Kl_input_converter(self):
+        #convert the parameters read from the app to the input of fitting func in the fit_Spectrum_Kl code
+        # Long_input:
+        fitted_freq = self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed()
+        ninput = np.array([7, 0, 1, len(fitted_freq), 1, 1], dtype='int32') # at this moment, all the 7 parms are opened.
+        # freq
+        freq = fitted_freq.astype(np.float64)
+        #spec_in
+        spec_in = np.zeros((1, len(freq), 4), dtype='float64', order='F')
+        spec_in[0, :, 0] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_tofit.compressed()
+        spec_in[0, :, 2] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_err_tofit.compressed()
+        #Real_input
+        rinput = np.array([0.17, 1e-6, 1.0, #SIMPLEX Step, SIMPLEX accuracy, Flux threshold to be fitted [sfu*GHz]
+                           self.rois[self.roi_group_idx][self.current_roi_idx].total_area,
+                           self.fit_params['depth_asec'].value,
+                           self.fit_params['Emin_keV'].value/1.e3], dtype='float64')
+        parguess = np.zeros((15, 3), dtype='float64', order='F')
+        for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
+            cur_arr = gstools.array_lmfit_convert_param(self.fit_params, ckeyword)
+            if ckeyword=='log_nnth': # 1d7 cm^-3
+                cur_arr = 10**cur_arr/1.e7
+            if ckeyword=='log_nth': #1d9 cm^-3
+                cur_arr = 10**cur_arr/1.e9
+            parguess[parm_idx,:] = cur_arr.astype(np.float64)
+            parguess[7:,:] = np.tile(np.array([5.0, 0.2, 20.0], dtype='float64'), (8, 1)) # not used
+        self.fit_Spectrum_Kl_input=(ninput, rinput, parguess, freq, spec_in)
+
+    def fit_Spectrum_Kl_output_converter(self):
+        #convert the output of fit_Spectrum_Kl code res then import to the app
+        if not hasattr(self, 'fit_Spectrum_Kl_output'):
+            raise ValueError('fit_Spectrum_Kl is not performed yet!')
+        self.fit_params_res = copy.deepcopy(self.fit_params)
+        for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
+            gstools.array_lmfit_convert_param(self.fit_params_res, ckeyword, par_value=self.fit_Spectrum_Kl_output[1][0][parm_idx], to_array=False)
+
+
+    def fit_Spectrum_Kl_call_preset(self):
+        # The calling of fit_Spectrum_Kl code follow its own convention, prepare the GUI display and the parameters for it.
+
+        # e- dist will be changed to 'pwl'
+        self.ele_function_selector_widget
+        pwl_index = self.ele_function_selector_widget.findText('powerlaw')
+        if pwl_index >= 0:
+            self.ele_function_selector_widget.setCurrentIndex(pwl_index)
+        self.ele_function_selector()
+        # 7 params will be opened.
+        for key in self.fit_params:
+            self.fit_params[key].vary = key in ['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']
+        self.fit_params_nvarys = 7
+        self.update_fit_param_widgets()
+        # switch to the flux density mode:
+        self.plot_tb_button.setChecked(False)
+        self.plot_flx_button.setChecked(True)
+        self.tb_flx_btnstate()
 
 class fileSeqDialog(QWidget):
     dialog_completed = pyqtSignal(bool, int, int)
