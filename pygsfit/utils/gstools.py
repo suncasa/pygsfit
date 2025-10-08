@@ -7,7 +7,120 @@ from numpy.ctypeslib import ndpointer
 from scipy import interpolate
 import warnings
 from PyQt5.QtCore import QThread, pyqtSignal, QRunnable,QObject
+from pathlib import Path
+import glob
 warnings.simplefilter("default")
+
+
+def find_and_load_mw_library():
+    """
+    Find and load the MWTransferArr library with multiple fallback options.
+
+    Priority order:
+    1. Newly compiled library named MWTransferArr_compiled* (from pip install)
+    2. Pre-compiled binaries in binaries directory
+
+    Returns:
+        Tuple[str, ctypes.CDLL]: (library_path, loaded_library)
+
+    Raises:
+        RuntimeError: If no working library can be found
+    """
+
+    # Get system info
+    system = platform.system()
+    machine = platform.machine()
+
+    # Get the package directory
+    package_dir = Path(__file__).parent.parent
+    binaries_dir = package_dir / "binaries"
+
+    # Priority 1: Look for compiled library with our specific name
+    # The compiled library will be named MWTransferArr_compiled with platform-specific suffix
+    compiled_pattern = str(binaries_dir/ "MWTransferArr_compiled*")
+    compiled_libs = glob.glob(compiled_pattern)
+    #print(f'!!!!!!{compiled_pattern} and {compiled_libs}')
+
+    if compiled_libs:
+        # Try the first match
+        lib_path = compiled_libs[0]
+        return lib_path
+        # try:
+        #     lib = ctypes.CDLL(lib_path)
+        #     # Verify it has the expected function
+        #     try:
+        #         _ = lib.pyGET_MW
+        #         print(f"Successfully loaded compiled MW library from: {lib_path}")
+        #         return lib_path, lib
+        #     except AttributeError:
+        #         try:
+        #             _ = lib.PyGET_MW
+        #             print(f"Successfully loaded compiled MW library from: {lib_path}")
+        #             return lib_path, lib
+        #         except AttributeError:
+        #             print(f"Warning: Compiled library doesn't have pyGET_MW function")
+        # except OSError as e:
+        #     print(f"Warning: Failed to load compiled library: {e}")
+
+    # Priority 2: Fall back to pre-compiled binaries
+
+    if system == 'Darwin':  # macOS
+        if machine == 'arm64':
+            precompiled_name = "MWTransferArr_arm64.so"
+        else:
+            precompiled_name = "MWTransferArr.so"
+    elif system == 'Linux':
+        precompiled_name = "MWTransferArr.so"
+    elif system == 'Windows':
+        precompiled_name = "MWTransferArr64.dll"
+    else:
+        raise RuntimeError(f"Unsupported platform: {system}")
+
+    precompiled_path = binaries_dir / precompiled_name
+
+    if precompiled_path.exists():
+        return precompiled_path
+        # try:
+        #     lib = ctypes.CDLL(str(precompiled_path))
+        #     # Verify function exists
+        #     try:
+        #         _ = lib.pyGET_MW
+        #     except AttributeError:
+        #         _ = lib.PyGET_MW  # Try alternative name
+        #
+        #     print(f"Using pre-compiled library from: {precompiled_path}")
+        #     warnings.warn(
+        #         "Using pre-compiled binary. For better performance, consider reinstalling:\n"
+        #         "  pip install --force-reinstall --no-binary :all: pygsfit",
+        #         UserWarning
+        #     )
+        #     return str(precompiled_path), lib
+        #
+        # except (OSError, AttributeError) as e:
+        #     print(f"Failed to load pre-compiled library: {e}")
+
+    # If we get here, nothing worked
+    error_msg = (
+        "Could not find or load MWTransferArr library.\n\n"
+        f"Looked for:\n"
+        f"  1. Compiled library: {package_dir}/MWTransferArr_compiled*\n"
+        f"  2. Pre-compiled binary: {precompiled_path}\n\n"
+    )
+
+    if system == 'Darwin':
+        error_msg += (
+            "Solutions:\n"
+            "  1. Install OpenMP: brew install libomp\n"
+            "  2. Reinstall to compile: pip install --force-reinstall --no-binary :all: pygsfit\n"
+        )
+    elif system == 'Linux':
+        error_msg += (
+            "Solutions:\n"
+            "  1. Install OpenMP: sudo apt-get install libomp-dev\n"
+            "  2. Reinstall to compile: pip install --force-reinstall --no-binary :all: pygsfit\n"
+        )
+
+    raise RuntimeError(error_msg)
 
 def initGET_MW(libname, load_GRFF = False):
     """
@@ -150,17 +263,18 @@ class GSCostFunctions:
                 2. If tb/tb_err or flux/flux_err are provided, return the
                     (scaled) residual for each input frequency
         """
-        if platform.system() == 'Linux' or platform.system() == 'Darwin':
-            cur_lib_flie = '../binaries/MWTransferArr.so'
-            if platform.machine() == 'arm64':
-                cur_lib_flie = '../binaries/MWTransferArr_arm64.so'
-            libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   cur_lib_flie)
-        if platform.system() == 'Windows': ##TODO: not yet tested on Windows platform
-            libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   '../binaries/MWTransferArr64.dll')
+
+        # if platform.system() == 'Linux' or platform.system() == 'Darwin':
+        #     cur_lib_flie = '../binaries/MWTransferArr.so'
+        #     if platform.machine() == 'arm64':
+        #         cur_lib_flie = '../binaries/MWTransferArr_arm64.so'
+        #     libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+        #                            cur_lib_flie)
+        # if platform.system() == 'Windows': ##TODO: not yet tested on Windows platform
+        #     libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+        #                            '../binaries/MWTransferArr64.dll')
+        libname = find_and_load_mw_library()
         GET_MW = initGET_MW(libname)  # load the library
-        #todo: double power law has not been deployed yet
 
         asec2cm = 0.725e8
         if 'area_asec2' in fit_params.keys():
@@ -208,7 +322,7 @@ class GSCostFunctions:
         ParmLocal[1] = Tth  # T_0, K
         ParmLocal[2] = nth  # n_0 - thermal electron density, cm^{-3}
         ParmLocal[3] = Bmag  # B - magnetic field, G
-        ParmLocal[6] = 3  # distribution over energy (PLW is chosen)
+        ParmLocal[6] = 3  # distribution over energy (PLW is chosen, 3)
         ParmLocal[7] = nrl  # n_b - nonthermal electron density, cm^{-3}
         ParmLocal[9] = Emin  # E_min, MeV
         ParmLocal[10] = Emax  # E_max, MeV
@@ -571,15 +685,17 @@ def pyWrapper_Fit_Spectrum_Kl(ninput, rinput, parguess, freq, spec_in):
     :return:fitted spectrum, parameters and corresponding uncerntainties.
     """
     # find the lib
+    bin_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'binaries')
     if platform.system() == 'Linux' or platform.system() == 'Darwin':
-        cur_lib_flie = './binaries/fit_Spectrum_Kl.so'
+        cur_lib_flie = os.path.join(bin_folder,'fit_Spectrum_Kl.so')
         if platform.machine() == 'arm64':
-            cur_lib_flie = './binaries/fit_Spectrum_Kl_arm64.so'
+            cur_lib_flie = os.path.join(bin_folder,'fit_Spectrum_Kl_arm64.so')
         libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                cur_lib_flie)
     if platform.system() == 'Windows':  ##TODO: not yet tested on Windows platform
+        cur_lib_flie = os.path.join(bin_folder, 'fit_Spectrum_Kl.dll')
         libname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                               './binaries/XXX.dll')
+                               cur_lib_flie)
     #orgnize the input args
     n_freq = len(freq)
     ninput[3] = np.int32(n_freq)

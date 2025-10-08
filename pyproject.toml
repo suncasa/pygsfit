@@ -1,0 +1,68 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "oldest-supported-numpy"  # Helps with NumPy ABI compatibility
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pygsfit"
+version = "1.0.15"  # Bump version for the new build system
+description = "Python GUI for spectral fitting of radio spectral imaging data"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Bin Chen"},
+    {name = "Sijie Yu"},
+    {name = "Yuqian Wei"},
+    {name = "Surajit Mondal"},
+]
+keywords = ["astronomy", "spectral", "fitting", "gui", "solar", "radio"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "astropy",
+    "corner",
+    "h5py",
+    "lmfit",
+    "matplotlib",
+    "numpy",
+    "pyqtgraph",
+    "PyQt5",
+    "regions",
+    "scipy",
+    "shapely",
+    "sunpy[all]",
+    "tqdm",
+    "emcee>=3.0.0",
+    "Pandas>=2.2.0",
+]
+
+[project.scripts]
+pygsfit = "pygsfit.pygsfit:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pygsfit*"]
+
+[tool.setuptools.package-data]
+pygsfit = [
+    "binaries/*.so",
+    "binaries/*.dll",
+    "src_gyrosynchrotron/*.cpp",
+    "src_gyrosynchrotron/*.h",
+    "resources/*.svg",
+]

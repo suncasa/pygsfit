@@ -1,0 +1,12 @@
+
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.py
+recursive-include pygsfit/src_gyrosynchrotron *.cpp *.h
+recursive-include pygsfit/resources *.svg
+recursive-include pygsfit/binaries *.so *.dll
+include pygsfit/*.py
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store

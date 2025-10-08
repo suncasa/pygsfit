@@ -21,7 +21,7 @@ from scipy.spatial import ConvexHull
 from matplotlib.patches import Polygon, Rectangle
 from matplotlib.collections import LineCollection, QuadMesh
 from shapely.geometry import LineString, box, Point
-from .gstools_ori import sfu2tb
+from .gstools import sfu2tb
 
 class LineSegmentROIX(pg.ROI):
     r"""

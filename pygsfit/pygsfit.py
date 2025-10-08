@@ -1,48 +1,48 @@
 import copy
+import glob
+import multiprocessing
 import os
+import pickle
 import sys
+import threading
 
 import astropy
 import astropy.units as u
+import h5py
 import lmfit
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.ma as ma
 import pyqtgraph as pg
-import sunpy
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
+from PyQt5.QtWidgets import QScrollArea
 from astropy import wcs
 from astropy.io import fits
 from astropy.time import Time, TimeDelta
-from matplotlib import patches
+from matplotlib import dates as mdates
 from matplotlib.backends.backend_qt5agg import FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
-from sunpy import map as smap
-import h5py
-import threading
-from tqdm import *
-import multiprocessing
-import tempfile
-import glob
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.interpolate import interp1d
-import pickle
-from utils import gstools
-from utils.img_utils import cornor_plot
+from sunpy import map as smap
+from tqdm import *
+from matplotlib import dates as mdates
+from matplotlib.colors import LogNorm
 
-# import re
-# import time
-# from astropy.coordinates import SkyCoord
-# import datetime
-# import dill
+
+
+from pygsfit.utils.img_utils import cornor_plot
+from pygsfit.utils.img_utils import submap_of_file1, resize_array
+from pygsfit.utils.export_pygsfitcp_batch_script import export_cp_batch_script_from_app
 
 
 filedir = os.path.dirname(os.path.realpath(__file__))
 print(filedir)
 sys.path.append(filedir)
-from utils import gstools_ori, roiutils, ndfits
+from utils import gstools, roiutils, ndfits
 from utils.roiutils import PolyLineROIX, Grid_Dialog
 import warnings
 
@@ -77,6 +77,12 @@ fit_param_text = {'Bx100G': 'B [\u00d7100 G]',
 
 class App(QMainWindow):
     def __init__(self):
+        """
+        Initialize the main application window and set up default parameters.
+
+        Sets up GUI components, default file paths, fitting parameters, frequency bounds,
+        and initializes various state variables for the spectral fitting application.
+        """
         super().__init__()
 
         self.eoimg_fname = '<Select or enter a valid EOVSA image fits file name>'
@@ -95,7 +101,11 @@ class App(QMainWindow):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
         self._main = QWidget()
-        self.setCentralWidget(self._main)
+        #self.setCentralWidget(self._main)
+        scroll = QScrollArea(self)
+        scroll.setWidget(self._main)
+        scroll.setWidgetResizable(True)
+        self.setCentralWidget(scroll)
         self.fit_method = 'nelder'
         self.emcee_save_file = ''
         self.fit_params = lmfit.Parameters()
@@ -146,8 +156,8 @@ class App(QMainWindow):
         self.is_calibrated_tp = True
         self.qlookimg_axs = None
         self.qlookdspec_ax = None
-        #for signal slots:
-        #self.update_roi_index.connect(self.set_roi_index)
+        # for signal slots:
+        # self.update_roi_index.connect(self.set_roi_index)
         # some controls for qlookplot
         self.opencontour = True
         self.clevels = np.array([0.7])
@@ -164,11 +174,21 @@ class App(QMainWindow):
         # ## quick input for debug --------------
         # self.eoimg_file_select()
         # ## quick input for debug --------------
-        #self.eoimg_fname = '/Users/walterwei/Downloads/20220511/slf_final_XX_t19_allbd.fits'
-        #self.eoimg_file_select_return()
+        # self.eoimg_fname = ['/Users/walterwei/Downloads/20220511/slf_final_XX_t19_allbd.fits']
+        # self.eoimg_files_seq_select_return()
 
-    def _create_pgcmap(self, cmap='viridis', ncolorstop=6):
-        """This is to create the cmap for pyqtgraph's ImageView Widgets"""
+    @staticmethod
+    def _create_pgcmap(cmap='viridis', ncolorstop=6):
+        """
+        Create a colormap for PyQtGraph ImageView widgets.
+
+        Args:
+            cmap (str): Matplotlib colormap name
+            ncolorstop (int): Number of color stops in the colormap
+
+        Returns:
+            pg.ColorMap: PyQtGraph colormap object
+        """
         from matplotlib import cm
         mpl_cmap = cm.get_cmap(cmap, ncolorstop)
         mpl_colors = mpl_cmap(np.linspace(0, 1, ncolorstop)) * 255
@@ -180,8 +200,12 @@ class App(QMainWindow):
         return cmap
 
     def _createToolBars(self):
-        # Using a title
-        # fileToolBar = self.addToolBar("File")
+        """
+        Create and configure application toolbars for ROI selection and manipulation.
+
+        Sets up toolbar buttons for different ROI types (rectangle, ellipse, polygon,
+        line segment, polyline) with appropriate icons and tooltips.
+        """
         iconsize = QSize(50, 50)
         selectToolBar = self.addToolBar("ADD")
         self.addSelectAction = QAction(QIcon("{}/resources/add-button.svg".format(filedir)), "&Add ROI", self)
@@ -240,15 +264,6 @@ class App(QMainWindow):
                                           "background-color : #555555;"
                                           "}")
 
-        # self.multiRectButton = QToolButton(self, text="MultiRectROI", checkable=True)
-        # self.multiRectButton.setIcon(QIcon("{}/resources/slice-line.svg".format(filedir)))
-        # self.multiRectButton.setIconSize(iconsize)
-        # self.multiRectButton.setToolTip('PolyLine slice tool')
-        # self.multiRectButton.setStyleSheet("QToolButton::hover"
-        #                                    "{"
-        #                                    "background-color : #555555;"
-        #                                    "}")
-
         self.toolBarButtonGroup = QButtonGroup(self, exclusive=True)
         for button in [
             self.rectButton,
@@ -269,24 +284,13 @@ class App(QMainWindow):
         roiToolBar.addWidget(self.add2slice)
         # self.add2slice.toggled.connect(self.is_calibrated_tp_state)
 
-        # self.addSelectAction.set(True)
-        # self.rectAction = QAction(QIcon("{}/resources/roi-rect.svg".format(filedir)), "&Rectangle", self)
-        # self.rectAction.setCheckable(True)
-        # self.circAction = QAction(QIcon("{}/resources/roi-circ.svg".format(filedir)), "&Circle", self)
-        # self.circAction.setCheckable(True)
-        # self.polylineAction = QAction(QIcon("{}/resources/roi-polyline.svg".format(filedir)), "&PolyLine", self)
-        # self.polylineAction.setCheckable(True)
-        # roiToolBar.addAction(self.rectAction)
-        # roiToolBar.addAction(self.circAction)
-        # roiToolBar.addAction(self.polylineAction)
-        # # # Using a QToolBar object
-        # # editToolBar = QToolBar("Edit", self)
-        # # self.addToolBar(editToolBar)
-        # # # Using a QToolBar object and a toolbar area
-        # # helpToolBar = QToolBar("Image", self)
-        # # self.addToolBar(Qt.TopToolBarArea, helpToolBar)
-
     def _createMenuBar(self):
+        """
+        Create and configure the main application menu bar.
+
+        Sets up File menu with options for loading EOVSA images, AIA files,
+        spectrograms, and exporting batch scripts.
+        """
         menubar = self.menuBar()
         ## PYQT5 does not support native menubar on MacOS
         menubar.setNativeMenuBar(False)
@@ -304,8 +308,12 @@ class App(QMainWindow):
         action_loadEOVSAspectrogram.triggered.connect(self.eodspec_file_select)
         actionFile.addAction(action_loadEOVSAspectrogram)
         action_exportBatchScript = QAction("Export Batch Script", self)
+        action_export_cp_script = QAction("Export pygsfit_cp Batch Script", self)
+        action_export_cp_script.triggered.connect(self.export_cp_batch_script)
+
         action_exportBatchScript.triggered.connect(self.export_batch_script)
         actionFile.addAction(action_exportBatchScript)
+        actionFile.addAction(action_export_cp_script)
         # actionFile.addAction("Open AIA")
         # actionFile.addAction("Open EOVSA Spectrogram")
         actionFile.addSeparator()
@@ -354,6 +362,12 @@ class App(QMainWindow):
     # Explorer Tab User Interface
     #
     def initUItab_explorer(self):
+        """
+        Initialize the main explorer tab user interface.
+
+        Sets up the complete GUI layout including image display areas, spectral plots,
+        ROI controls, fitting parameters, and quick-look panels.
+        """
         # Create main layout (a Vertical Layout)
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -388,10 +402,10 @@ class App(QMainWindow):
         # Add plotting area for multi-panel EOVSA images
         self.pg_img_plot = pg.PlotItem(labels={'bottom': ('Solar X [arcsec]', ''), 'left': ('Solar Y [arcsec]', '')})
         self.pg_img_canvas = pg.ImageView(name='EOVSA Explorer', view=self.pg_img_plot)
-        #self.pg_img_canvas_wrapper = CustomImageViewer(wrapped_image_view = self.pg_img_canvas)
+        # self.pg_img_canvas_wrapper = CustomImageViewer(wrapped_image_view = self.pg_img_canvas)
 
         pgimgbox.addWidget(self.pg_img_canvas)
-        #pgimgbox.addWidget(self.pg_img_canvas_wrapper)
+        # pgimgbox.addWidget(self.pg_img_canvas_wrapper)
         # pgimgbox.addLayout(pgbuttonbox)
         pgimgbox.addLayout(pg_img_status_box)
         data_layout_lowerbox.addLayout(pgimgbox, 0, 0)
@@ -415,11 +429,10 @@ class App(QMainWindow):
         self.eoimg_seq_slider.sliderReleased.connect(self.time_slider_released)
         pgimgbox.insertWidget(0, self.eoimg_seq_slider_label_widget)
 
-        #Display the selectde time
+        # Display the selectde time
         self.text_box_time = QLabel()
         self.text_box_time.setText('')
         eoimg_seq_slider_label_layout.addWidget(self.text_box_time)
-
 
         # right box for spectral plots
         self.specplotarea = QVBoxLayout()
@@ -531,8 +544,8 @@ class App(QMainWindow):
         self.add_to_roigroup_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.add_to_roigroup_button.setMenu(QMenu(self.add_to_roigroup_button))
         self.add_to_roigroup_widget = QListWidget()
-        self.add_to_roigroup_widget.addItems([str(i) for i in range(len(self.rois)+1)])
-        #self.add_to_roigroup_widget.addItems(['0', '1', '2'])  ##todo: update ROI group # on the fly
+        self.add_to_roigroup_widget.addItems([str(i) for i in range(len(self.rois) + 1)])
+        # self.add_to_roigroup_widget.addItems(['0', '1', '2'])  ##todo: update ROI group # on the fly
         self.add_to_roigroup_widget.itemClicked.connect(self.add_to_roigroup_selection)
         action = QWidgetAction(self.add_to_roigroup_button)
         action.setDefaultWidget(self.add_to_roigroup_widget)
@@ -585,15 +598,15 @@ class App(QMainWindow):
         self.ncpu_spinbox.setMinimum(1)  # Assuming you want to set a minimum value
         self.ncpu_spinbox.setMaximum(48)  # And a maximum value
         self.ncpu_spinbox.setRange(1, 48)
-        self.ncpu_spinbox.setValue(multiprocessing.cpu_count()-2)
+        self.ncpu_spinbox.setValue(multiprocessing.cpu_count() - 2)
         roi_grid_box.addWidget(self.ncpu_spinbox)
         # self.roi_grid_size_selector = QSpinBox()
         # self.roi_grid_size_selector.setRange(1, 1000)
         # self.roi_grid_size_selector.setSingleStep(1)
         # self.roi_grid_size_selector.setValue(2)
-        #self.roi_grid_size_selector.valueChanged.connect(self.roi_grid_size_valuechange)
-        #roi_grid_box.addWidget(QLabel("Grid Size (pix)"))
-        #roi_grid_box.addWidget(self.roi_grid_size_selector)
+        # self.roi_grid_size_selector.valueChanged.connect(self.roi_grid_size_valuechange)
+        # roi_grid_box.addWidget(QLabel("Grid Size (pix)"))
+        # roi_grid_box.addWidget(self.roi_grid_size_selector)
         roi_definition_group_box.addLayout(roi_grid_box)
         ngrid_rois_label = QLabel("nGridRois")
         roi_grid_box.addWidget(ngrid_rois_label)  # Add label to the layout
@@ -603,7 +616,6 @@ class App(QMainWindow):
         self.grid_roi_number_lcd.display(self.number_grid_rois)
         roi_grid_box.addWidget(self.grid_roi_number_lcd)
         roi_definition_group_box.addLayout(roi_grid_box)
-
 
         fit_layout.addWidget(roi_definition_group)
         # Group 2: ROI Selection Group
@@ -620,7 +632,7 @@ class App(QMainWindow):
         self.roigroup_selection_button.setMenu(QMenu(self.roigroup_selection_button))
         self.roigroup_selection_widget = QListWidget()
         self.roigroup_selection_widget.addItems([str(i) for i in range(len(self.rois))])
-        #self.roigroup_selection_widget.addItems(['0', '1', '2'])  ##todo: update ROI group list on the fly
+        # self.roigroup_selection_widget.addItems(['0', '1', '2'])  ##todo: update ROI group list on the fly
         self.roigroup_selection_widget.itemClicked.connect(self.roigroup_selection)
         action = QWidgetAction(self.roigroup_selection_button)
         action.setDefaultWidget(self.roigroup_selection_widget)
@@ -742,7 +754,8 @@ class App(QMainWindow):
         # Group 2: Fit Method
         self.fit_method_box = QHBoxLayout()
         self.fit_method_selector_widget = QComboBox()
-        self.fit_method_selector_widget.addItems(["nelder", "basinhopping", "differential_evolution", "mcmc", "Fleishman"])
+        self.fit_method_selector_widget.addItems(
+            ["nelder", "basinhopping", "differential_evolution", "mcmc", "Fleishman"])
         self.fit_method_selector_widget.currentIndexChanged.connect(self.fit_method_selector)
         self.fit_method_box.addWidget(QLabel("Fit Method"))
         self.fit_method_box.addWidget(self.fit_method_selector_widget)
@@ -788,20 +801,36 @@ class App(QMainWindow):
     # Analyzer Tab User Interface
     #
     def initUItab_analyzer(self):
+        """
+        Initialize the analyzer tab user interface.
+
+        Currently a placeholder for future analysis functionality.
+        """
         # Create main layout (a Vertical Layout)
         mainlayout = QVBoxLayout()
         mainlayout.addWidget(QLabel("This is the tab for analyzing fit results"))
         self.tabs.widget(1).setLayout(mainlayout)
 
+    # ===============================================
+    # ========== FILE I/O AND DATA LOADING ==========
+    # ===============================================
+
     def eoimg_file_select(self):
-        """ Handle Browse button for EOVSA FITS file"""
+        """
+        Handle file selection dialog for EOVSA FITS image files.
+
+        Opens a file dialog to select one or more EOVSA spectral image FITS files
+        and determines if they form a time sequence.
+        """
+        # """ Handle Browse button for EOVSA FITS file"""
         # self.fname = QFileDialog.getExistingDirectory(self, 'Select FITS File', './', QFileDialog.ShowDirsOnly)
         ## quick input for debug -------------
-        tmp_eoimg_fname_seq, _file_filter = QFileDialog.getOpenFileNames(self, 'Select EOVSA Spectral Image FITS File(s)',
-                                                                     './', 'FITS Images (*.fits *.fit *.ft *.fts)')
+        tmp_eoimg_fname_seq, _file_filter = QFileDialog.getOpenFileNames(self,
+                                                                         'Select EOVSA Spectral Image FITS File(s)',
+                                                                         './', 'FITS Images (*.fits *.fit *.ft *.fts)')
         self.data_in_seq = len(tmp_eoimg_fname_seq) > 1
         self.eoimg_time_seq = tmp_eoimg_fname_seq
-        if not len(self.eoimg_time_seq)==0:
+        if not len(self.eoimg_time_seq) == 0:
             self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
             self.eoimg_seq_slider_label_widget.setVisible(self.data_in_seq)
             self.cur_frame_idx = 0
@@ -809,16 +838,21 @@ class App(QMainWindow):
             print('{} file(s) are selected and loaded as a img sequence.'.format(len(tmp_eoimg_fname_seq)))
         else:
             print('No file is selected')
-        
+
         # self.eoimg_fname = 'EOVSA_20210507T190135.000000.outim.image.allbd.fits'
         ## quick input for debug -------------
         # self.eoimg_fitsentry.setText(self.eoimg_fname)
 
-
     def eoimg_files_seq_select_return(self):
-        ''' Called when load eoimg in a time sequence.
-            Trys to read FITS header and return header info (no data read at this time)
-        '''
+        """
+        Process selected EOVSA image files and load metadata.
+
+        Reads FITS headers, handles both 3D and 4D data cubes, sets up coordinate
+        systems, and initializes the image display. Supports time sequence data.
+        """
+        # ''' Called when load eoimg in a time sequence.
+        #    Trys to read FITS header and return header info (no data read at this time)
+        # '''
 
         # print('self.qlookimg_axs is None:',self.qlookimg_axs is None)
         if self.qlookimg_axs is not None:
@@ -841,7 +875,6 @@ class App(QMainWindow):
             self.has_rois = False
 
         try:
-        #if True:
             meta, data = ndfits.read(self.eoimg_fname)
             if meta['naxis'] < 3:
                 print('Input fits file must have at least 3 dimensions. Abort..')
@@ -872,22 +905,12 @@ class App(QMainWindow):
                                     self.meta['ny'] * self.dy]
             self.mapx, self.mapy = np.linspace(self.x0, self.x1, meta['nx']), np.linspace(self.y0, self.y1, meta['ny'])
             self.tp_cal_factor = np.ones_like(self.cfreqs)
-            self.tp_cal_factor = np.array([0.79348543, 0.73590569, 0.77043764, 0.88938196, 0.92463635,
-       0.93260632, 0.95657094, 0.99009901, 0.98495543, 0.90825406,
-       1.09157371, 1.09355798, 1.12237417, 1.11382516, 1.12874905,
-       1.13748819, 1.13393249, 1.18174961, 1.24530376, 1.22788188,
-       1.30646466, 1.37205013, 1.40447417, 1.3382169 , 1.34913838,
-       1.38952156, 1.35252539, 1.3359842 , 1.35563557, 1.35675904,
-       1.1134746 , 1.02580045, 1.11001961, 1.27738334, 1.19679582,
-       1.22670118, 0.99580251, 0.72279365, 0.54225129, 0.59278818,
-       0.92447833, 0.80641102, 0.67613515, 0.70044481, 0.64387755,
-       0.52238087, 0.5852915 , 0.54179257, 0.55961721, 0.5777587 ])
 
             self.has_eovsamap = True
             with fits.open(self.eoimg_fname, mode='readonly') as wcs_hdul:
                 self.eo_wcs = wcs.WCS(wcs_hdul[0].header)
             # self.infoEdit.setPlainText(repr(rheader))
-            #extend a time axis to the data:
+            # extend a time axis to the data:
             self.eoimg_date_seq = []
             self.eoimg_exptime_seq = []
             new_4d_data = np.repeat(np.expand_dims(self.data, axis=1), repeats=len(self.eoimg_time_seq), axis=1)
@@ -900,13 +923,13 @@ class App(QMainWindow):
                     raise ValueError('Input fits file must have 3 or 4 dimensions. Abort..')
                 self.eoimg_date_seq.append(cmeta['refmap'].date)
                 self.eoimg_exptime_seq.append(TimeDelta(cmeta['refmap'].meta['exptime'], format='sec'))
-                new_4d_data[self.pol_select_idx, cf_idx,:,:,:] = cdata[self.pol_select_idx, :,:,:]
+                new_4d_data[self.pol_select_idx, cf_idx, :, :, :] = cdata[self.pol_select_idx, :, :, :]
             self.data = new_4d_data
-            self.eoimg_seq_slider.setMaximum(len(self.eoimg_time_seq)-1)
+            self.eoimg_seq_slider.setMaximum(len(self.eoimg_time_seq) - 1)
             self.eoimg_seq_slider.setValue(self.cur_frame_idx)
             self.text_box_time.setText(self.eoimg_date_seq[self.cur_frame_idx].iso[11:])
         except:
-        #else:
+            # else:
             self.statusBar.showMessage('Filename is not a valid FITS file', 2000)
             self.eoimg_fname = '<Select or enter a valid fits filename>'
             self.eoimg_time_seq = []
@@ -920,26 +943,11 @@ class App(QMainWindow):
             self.showqlookimg()
         # Clean up all existing plots
 
-        #self.plot_qlookmap()
+        # self.plot_qlookmap()
         self.init_pgspecplot()
         self.plot_pg_eovsamap()
         if self.has_dspec:
             self.plot_dspec()
-
-    def time_slider_slided(self):
-        self.text_box_time.setText(self.eoimg_date_seq[self.eoimg_seq_slider.value()].iso[11:])
-
-    def time_slider_released(self):
-        self.cur_frame_idx = self.eoimg_seq_slider.value()
-        self.plot_eoimgs_trange_on_dspec()
-        # if not self.qlookimgbutton.isChecked():
-        #     self.qlookimgbutton.setChecked(True)
-        # else:
-        #     self.showqlookimg()
-        self.init_pgspecplot()
-        self.plot_pg_eovsamap()
-        self.calc_roi_spec(None)
-        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
 
     def eodspec_file_select(self):
         """ Handle Browse button for EOVSA FITS file"""
@@ -950,6 +958,12 @@ class App(QMainWindow):
         self.eodspec_file_select_return()
 
     def eodspec_file_select_return(self):
+        """
+        Process and load EOVSA dynamic spectrum data.
+
+        Reads dynamic spectrum FITS file, extracts frequency and time axes,
+        and stores spectrum data for analysis.
+        """
         try:
             hdulist = fits.open(self.eodspec_fname)
             dspec = hdulist[0].data
@@ -971,23 +985,6 @@ class App(QMainWindow):
             self.qlookdspecbutton.setChecked(True)
         else:
             self.showqlookdspec()
-
-    def is_calibrated_tp_state(self):
-        if self.is_calibrated_tp_button.isChecked() == True:
-            self.statusBar.showMessage('Loaded spectrogram is calibrated total power dynamic spectrum.')
-            self.is_calibrated_tp = True
-        else:
-            self.statusBar.showMessage('Loaded spectrogram is *not* calibrated total power dynamic spectrum.')
-            self.is_calibrated_tp = False
-
-    ## Surajit
-    def savedata_state(self):
-        if self.savedata_button.isChecked() == True:
-            self.statusBar.showMessage('Saving the fit data')
-            self.savedata = True
-        else:
-            self.statusBar.showMessage('Not saving the fit data')
-            self.savedata = False
 
     def aiafile_select(self):
         """ Handle Browse button for AIA FITS file """
@@ -1017,8 +1014,64 @@ class App(QMainWindow):
             self.showqlookimg()
         # self.plot_qlookmap()
 
+    # ===============================================
+    # ========== TIME SEQUENCE CONTROLS ==========
+    # ===============================================
+    def time_slider_slided(self):
+        """
+        Handle time slider movement during dragging.
+
+        Updates the time display label to show the time corresponding
+        to the current slider position.
+        """
+        self.text_box_time.setText(self.eoimg_date_seq[self.eoimg_seq_slider.value()].iso[11:])
+
+    def time_slider_released(self):
+        """
+        Handle time slider release after dragging.
+
+        Updates the current frame index, refreshes displays, and recalculates
+        ROI spectra for the new time frame.
+        """
+        self.cur_frame_idx = self.eoimg_seq_slider.value()
+        self.plot_eoimgs_trange_on_dspec()
+        # if not self.qlookimgbutton.isChecked():
+        #     self.qlookimgbutton.setChecked(True)
+        # else:
+        #     self.showqlookimg()
+        self.init_pgspecplot()
+        self.plot_pg_eovsamap()
+        self.calc_roi_spec(None)
+        self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
+
+    def update_fbar(self):
+        """
+        Update the frequency bar indicator on the spectral plot.
+
+        Refreshes the vertical line showing the currently selected frequency
+        from the image timeline.
+        """
+        if self.fbar is not None:
+            try:
+                self.speccanvas.removeItem(self.fbar)
+                self.fbar = self.speccanvas.plot(x=np.log10([self.pg_img_canvas.timeLine.getXPos()] * 2), y=[1, 15],
+                                                 pen='k')
+                self.speccanvas.addItem(self.fbar)
+            except:
+                pass
+
+    # ===============================================
+    # ========== IMAGE DISPLAY AND VISUALIZATION ==========
+    # ===============================================
+
     def init_pgspecplot(self):
-        """ Initial Spectral Plot if no data has been loaded """
+        """
+        Initialize spectral plot with appropriate axis labels and tick marks.
+
+        Sets up logarithmic frequency and intensity axes with proper tick positions
+        for both brightness temperature and flux density modes.
+         Initial Spectral Plot if no data has been loaded
+        """
         xticksv = list(range(0, 4))
         self.xticks = []
         xticksv_minor = []
@@ -1072,16 +1125,21 @@ class App(QMainWindow):
         self.update_pgspec()
 
     def plot_qlookmap(self):
-        from utils.img_utils import submap_of_file1, resize_array
-        #todo qlook is totally messed up at this moment, will be fixed soon.
-        """Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map"""
+        """
+        Create quick-look plot of solar images using matplotlib.
+
+        Plots AIA background images with EOVSA contour overlays for multiple
+        frequencies. Currently has known issues and needs fixing.
+        Quicklook plot in the upper box using matplotlib.pyplot and sunpy.map
+        """
+        # todo qlook is totally messed up at this moment, will be fixed soon.
         # Plot a quicklook map
         ax0 = self.qlookimg_axs[0]
         if self.has_aiamap:
             if os.path.exists(self.aiafname):
                 try:
                     aiamap = smap.Map(self.aiafname)
-                    #self.has_aiamap = True
+                    # self.has_aiamap = True
                 except:
                     self.statusBar.showMessage('Something is wrong with the provided AIA FITS file', 2000)
                     self.has_aiamap = False
@@ -1091,6 +1149,7 @@ class App(QMainWindow):
             else:
                 submap_aia = aiamap
             ax0 = self.update_axes_projection(ax0, projection=submap_aia)
+            ##todo: reproject eovsa to aia (bug)
             bounds = ax0.axis()
             submap_aia.plot(axes=ax0, cmap=aiacmap, clip_interval=(1, 99.99) * u.percent)
             ax0.set_title('')
@@ -1102,22 +1161,22 @@ class App(QMainWindow):
             nspw = self.meta['nfreq']
             try:
                 self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd +
-                                                self.meta['refmap'].exposure_time.value / 2. / 24 / 3600, format='mjd')
+                                                    self.meta['refmap'].exposure_time.value / 2. / 24 / 3600,
+                                                    format='mjd')
             except:
                 print('EXPtime can not be found, use the saved date solely')
                 self.eoimg_date = eoimg_date = Time(self.meta['refmap'].date.mjd, format='mjd')
 
-
             eotimestr = eoimg_date.isot[:-4]
-            #rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
-            #solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
-            #ax0.add_patch(solar_limb)
-            #rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
+            # rsun_obs = sunpy.coordinates.sun.angular_radius(eoimg_date).value
+            # solar_limb = patches.Circle((0, 0), radius=rsun_obs, fill=False, color='k', lw=1, linestyle=':')
+            # ax0.add_patch(solar_limb)
+            # rect = patches.Rectangle((self.x0, self.y0), self.x1 - self.x0, self.y1 - self.y0,
             #                         color='k', alpha=0.7, lw=1, fill=False)
-            #ax0.add_patch(rect)
+            # ax0.add_patch(rect)
             icmap = plt.get_cmap('RdYlBu')
             for s, sp in enumerate(self.cfreqs):
-                #data = self.data[self.pol_select_idx, s, ...]
+                # data = self.data[self.pol_select_idx, s, ...]
                 data = self.data[self.pol_select_idx, self.cur_frame_idx, s, ...]
                 cur_sunmap = smap.Map(data, self.meta['refmap'].meta)
                 clvls = self.clevels * np.nanmax(data) * u.K
@@ -1125,8 +1184,8 @@ class App(QMainWindow):
                 if not self.has_aiamap:
                     cur_sunmap.draw_contours(clvls, axes=ax0, colors=rcmap, alpha=self.calpha)
                 else:
-                   stdata1 = resize_array(data, submap_aia.data.shape)
-                   ax0.contour(stdata1, [self.clevels*np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
+                    stdata1 = resize_array(data, submap_aia.data.shape)
+                    ax0.contour(stdata1, [self.clevels * np.nanmax(stdata1)], colors=rcmap, alpha=self.calpha)
             self.qlookimg_canvas.figure.suptitle('EOVSA at {}'.format(eotimestr))
         ax0.set_xlabel('Solar X [arcsec]')
         ax0.set_ylabel('Solar Y [arcsec]')
@@ -1134,13 +1193,17 @@ class App(QMainWindow):
         self.qlookimg_canvas.draw()
 
 
-    def plot_dspec(self, cmap='viridis', vmin=None, vmax=None):
+    def plot_dspec_ori(self, cmap='viridis', vmin=None, vmax=None):
+        """
+        Plot dynamic spectrum with time and frequency axes and click interaction.
+        """
         from matplotlib import dates as mdates
         from mpl_toolkits.axes_grid1 import make_axes_locatable
+
         if not vmin:
-            vmin = np.nanmin(vmin)
+            vmin = np.nanmin(self.dspec['dspec'])
         if not vmax:
-            vmax = np.nanmax(vmax)
+            vmax = np.nanmax(self.dspec['dspec'])
         ax = self.qlookdspec_ax
         tim = self.dspec['time_axis']
         tim_plt = self.dspec['time_axis'].plot_date
@@ -1152,7 +1215,7 @@ class App(QMainWindow):
             vmax = np.percentile(spec.flatten(), 90)
         observatory = self.dspec['observatory']
         pol = self.dspec['pol']
-        ##todo: now I am only using the first polarization and first baseline
+
         if spec.ndim < 2:
             print('Dynamic spectrum needs at least 2 dimensions. We have {0:d} here.'.format(spec.ndim))
             return
@@ -1166,6 +1229,9 @@ class App(QMainWindow):
             print('Dynamic spectrum has more than 2 dimensions {0:d}. '
                   'I am only using the first polarization and first baseline'.format(spec.ndim))
             spec_plt = spec[0, 0]
+
+        # Clear the axes first
+        ax.clear()
 
         im_spec = ax.pcolormesh(tim_plt, fghz, spec_plt, cmap=cmap,
                                 vmin=vmin, vmax=vmax, rasterized=True)
@@ -1194,13 +1260,111 @@ class App(QMainWindow):
         self.qlookdspec_canvas.figure.subplots_adjust(left=0.1, right=0.85,
                                                       bottom=0.20, top=0.92,
                                                       hspace=0, wspace=0)
+
+        # Connect click handler for background subtraction if active
+        if hasattr(self, 'bkg_subtraction_active') and self.bkg_subtraction_active:
+            # Disconnect any existing handlers first
+            if hasattr(self, 'dspec_click_cid'):
+                self.qlookdspec_canvas.mpl_disconnect(self.dspec_click_cid)
+            self.dspec_click_cid = self.qlookdspec_canvas.mpl_connect('button_press_event',
+                                                                      self.dspec_time_click_handler)
+
         self.qlookdspec_canvas.draw()
-        self.plot_eoimgs_trange_on_dspec()
 
+        # Only call this if NOT in background subtraction mode
+        if not (hasattr(self, 'bkg_subtraction_active') and self.bkg_subtraction_active):
+            self.plot_eoimgs_trange_on_dspec()
 
+    def plot_dspec(self, cmap='viridis', vmin=None, vmax=None):
+        """Plot dynamic spectrum with time and frequency axes and click interaction."""
+        from matplotlib import dates as mdates
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        # Clear the figure completely to avoid duplicate colorbars
+        self.qlookdspec_canvas.figure.clear()
+        self.qlookdspec_ax = self.qlookdspec_canvas.figure.subplots(1, 1)
+        ax = self.qlookdspec_ax
+
+        tim = self.dspec['time_axis']
+        tim_plt = self.dspec['time_axis'].plot_date
+        fghz = self.dspec['freq_axis']
+        spec = self.dspec['dspec']
+
+        if not vmin:
+            vmin = max(1.e-2,np.nanpercentile(spec.flatten(), 2))
+            #vmin = np.nanmin(spec)
+        if not vmax:
+            vmax = np.nanpercentile(spec.flatten(), 99)
+            #vmax = np.nanmax(spec)
+        observatory = self.dspec['observatory']
+        pol = self.dspec['pol']
+
+        if spec.ndim < 2:
+            print('Dynamic spectrum needs at least 2 dimensions. We have {0:d} here.'.format(spec.ndim))
+            return
+        elif spec.ndim == 2:
+            nfreq, ntim = len(fghz), len(tim_plt)
+            npol = 1
+            nbl = 1
+            spec_plt = spec
+        else:
+            (npol, nbl, nfreq, ntim) = spec.shape
+            print('Dynamic spectrum has more than 2 dimensions {0:d}. '
+                  'I am only using the first polarization and first baseline'.format(spec.ndim))
+            spec_plt = spec[0, 0]
+
+        im_spec = ax.pcolormesh(tim_plt, fghz, spec_plt, cmap=cmap,
+                                norm=LogNorm(vmin=vmin, vmax=vmax), rasterized=True)
+        ax.set_title("{0:s} Stokes {1:s} Spectrogram on {2:s}".format(observatory, pol, tim[0].iso[:10]), fontsize=10)
+        ax.xaxis_date()
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.set_xlim(tim_plt[0], tim_plt[-1])
+        ax.set_ylim(fghz[0], fghz[-1])
+        ax.set_xlabel('Time [UT]', fontsize=9)
+        ax.set_ylabel('Frequency [GHz]')
+        for xlabel in ax.get_xmajorticklabels():
+            xlabel.set_rotation(30)
+            xlabel.set_horizontalalignment("right")
+
+        # add vertical bar to indicate the time of the EOVSA image
+        if hasattr(self, 'eoimg_date'):
+            ax.plot([self.eoimg_date.plot_date] * 2, [1, 20], color='w', lw=1)
+
+        divider = make_axes_locatable(ax)
+        cax_spec = divider.append_axes('right', size='3.0%', pad=0.05)
+        cax_spec.tick_params(direction='out')
+        print(f"debug {vmin} and {vmax}")
+        clb_spec = plt.colorbar(im_spec, ax=ax, cax=cax_spec)
+        clb_spec.set_label('Flux [sfu]')
+        self.qlookdspec_canvas.figure.subplots_adjust(left=0.1, right=0.85,
+                                                      bottom=0.20, top=0.92,
+                                                      hspace=0, wspace=0)
+
+        # Connect click handler for background subtraction if active
+        if hasattr(self, 'bkg_subtraction_active') and self.bkg_subtraction_active:
+            # Disconnect any existing handlers first
+            if hasattr(self, 'dspec_click_cid'):
+                self.qlookdspec_canvas.mpl_disconnect(self.dspec_click_cid)
+            self.dspec_click_cid = self.qlookdspec_canvas.mpl_connect('button_press_event',
+                                                                      self.dspec_time_click_handler)
+
+        self.qlookdspec_canvas.draw()
+
+        # Only call this if NOT in background subtraction mode
+        #if not (hasattr(self, 'bkg_subtraction_active') and self.bkg_subtraction_active):
+        if self.has_eovsamap and self.has_dspec:
+            self.plot_eoimgs_trange_on_dspec()
 
     def plot_eoimgs_trange_on_dspec(self):
-        from matplotlib import dates as mdates
+        """
+        Overlay EOVSA image time ranges on the dynamic spectrum plot.
+
+        Shows time intervals corresponding to each image in the sequence as
+        colored rectangles on the spectrogram, with click interaction.
+        """
+
         def onclick_eoimg_trange(event):
             for irect, rect in enumerate(rectangles):
                 if rect.contains(event)[0]:  # Check if click is inside the rectangle
@@ -1210,7 +1374,7 @@ class App(QMainWindow):
                     self.plot_pg_eovsamap()
                     self.calc_roi_spec(None)
                     self.eoimg_fname = self.eoimg_time_seq[self.cur_frame_idx]
-                    #plot_spans()  # Call to redraw the spans
+                    # plot_spans()  # Call to redraw the spans
                     break
 
         def get_or_create_twinx(ax):
@@ -1228,23 +1392,23 @@ class App(QMainWindow):
         def plot_spans():
             ax.cla()  # Clear previous spans
             for cframei, (start, end) in enumerate(eoimg_tr_list):
-                #c_color = 'crimson' if cframei == self.cur_frame_idx else 'navy'
+                # c_color = 'crimson' if cframei == self.cur_frame_idx else 'navy'
                 c_color = 'crimson'
                 rect = ax.axvspan(start, end, color=c_color, alpha=0.5)
                 rectangles.append(rect)
 
         if self.has_eovsamap and self.has_dspec:
             ax = get_or_create_twinx(self.qlookdspec_ax)
-            #ax = self.qlookdspec_ax
+            # ax = self.qlookdspec_ax
             eoimg_tr_list = [[cdate.plot_date, (cdate + cdelta).plot_date] for cdate, cdelta in
                              zip(self.eoimg_date_seq, self.eoimg_exptime_seq)]
             rectangles = []
             plot_spans()  # Initial call to plot the spans
             ax.figure.canvas.mpl_connect('button_press_event', onclick_eoimg_trange)
-            if len(rectangles)>1:
+            if len(rectangles) > 1:
                 cur_total_range = self.eoimg_date_seq[-1] - self.eoimg_date_seq[0]
-                ax.set_xlim([max(ax.get_xlim()[0], (self.eoimg_date_seq[0] - 3*cur_total_range).plot_date),
-                            min(ax.get_xlim()[1], (self.eoimg_date_seq[-1] + 3*cur_total_range).plot_date)])
+                ax.set_xlim([max(ax.get_xlim()[0], (self.eoimg_date_seq[0] - 3 * cur_total_range).plot_date),
+                             min(ax.get_xlim()[1], (self.eoimg_date_seq[-1] + 3 * cur_total_range).plot_date)])
             ax.xaxis_date()
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
             locator = mdates.AutoDateLocator()
@@ -1254,7 +1418,6 @@ class App(QMainWindow):
         else:
             print('EOVSA image(s) or Dspec is(are) not loaded yet')
 
-
     def update_axes_projection(self, cax, projection):
         pos = cax.get_position()
         cfig = self.qlookimg_canvas.figure
@@ -1263,31 +1426,27 @@ class App(QMainWindow):
         return new_ax
 
     def plot_pg_eovsamap(self):
-        """This is to plot the eovsamap with the pyqtgraph's ImageView Widget"""
+        """
+        Display EOVSA image data using PyQtGraph ImageView widget.
+
+        Loads and displays the current frame of EOVSA data with proper coordinate
+        scaling and colormap. Sets up background ROI if not already present.
+        This is to plot the eovsamap with the pyqtgraph's ImageView Widget
+        """
         if self.has_eovsamap:
-            # plot the images
-            # need to invert the y axis to put the origin to the lower left (tried invertY but labels are screwed up)
-            # self.pg_img_plot.setLimits(xMin=self.x0, xMax=self.x1, yMin=self.y0, yMax=self.y1)
-            # self.pgdata = self.data[self.pol_select_idx, :, ::-1, :].reshape(
-            #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
-            # self.pgdata = self.data[self.pol_select_idx, :, :, :].reshape(
-            #     (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
             print('loading the eovsa fits file')
-            self.pgdata = self.data[self.pol_select_idx,self.cur_frame_idx, :, :, :].reshape(
+            self.pgdata = self.data[self.pol_select_idx, self.cur_frame_idx, :, :, :].reshape(
                 (self.meta['nfreq'], self.meta['ny'], self.meta['nx']))
-            #self.pgdata = self.data[self.pol_select_idx,self.cur_frame_idx, :, :, :]
-            pos = np.where(self.pgdata > 1e9)
-            self.pgdata[pos] = 1e9
+            # self.pgdata = self.data[self.pol_select_idx,self.cur_frame_idx, :, :, :]
+            pos = np.where(self.pgdata > 1e10)
+            self.pgdata[pos] = 1e10
             del pos
             pos = np.where(self.pgdata < -1000)
             self.pgdata[pos] = -1000
             del pos
-            # self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs)
-            # self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs, pos=[self.x0, self.y0],
-            #                             scale=[self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
+
             self.pg_img_canvas.setImage(self.pgdata, xvals=self.cfreqs, pos=[self.x0, self.y0],
                                         scale=[self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
-            # self.pg_img_canvas.setImage(self.data[self.pol_select_idx], xvals=self.cfreqs)
             self.pg_img_canvas.getView().invertY(False)
 
             self.pg_img_canvas.setColorMap(self.pgcmap)
@@ -1309,7 +1468,16 @@ class App(QMainWindow):
                 self.bkg_roi.sigRegionChanged.connect(self.bkg_rgn_update)
 
     def pg_map_hover_event(self, event):
-        """Show the position, pixel, and value under the mouse cursor.
+        """
+        Handle mouse hover events over the EOVSA image display.
+
+        Shows cursor position, solar coordinates, frequency, and brightness
+        temperature values under the mouse cursor.
+
+        Show the position, pixel, and value under the mouse cursor.
+
+        Args:
+            event: PyQtGraph hover event object
         """
         vbox = self.pg_img_canvas.getView()
         if event.isExit():
@@ -1333,179 +1501,57 @@ class App(QMainWindow):
         # print(text_to_display)
         # self.pg_img_hover_label.setText(text_to_display, color='w')
 
-    def update_fitmask(self):
-        # update fit mask and the values for currently selected roi group
-        if self.has_rois:
-            for roi in self.rois[self.roi_group_idx]:
-                # define error in spectrum
-                if self.spec_in_tb:
-                    spec = roi.tb_max
-                    spec_bound = self.tb_spec_bound
-                    spec_rms = self.bkg_roi.tb_rms
-                else:
-                    spec = roi.total_flux
-                    spec_bound = self.flx_spec_bound
-                    spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
-                                              area=roi.total_area * u.arcsec ** 2, reverse=True).value
-                # add fractional err in quadrature
-                spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+    def showqlookimg(self):
+        for i in range(self.qlookimgbox.count()):
+            self.qlookimgbox.itemAt(i).widget().deleteLater()
 
-                spec_tofit0 = ma.masked_less_equal(spec, spec_bound[0])
-                freqghz_tofit0 = ma.masked_outside(self.cfreqs, self.fit_freq_bound[0], self.fit_freq_bound[1])
-                roi.mask_tofit = mask_tofit = np.logical_or(np.logical_or(freqghz_tofit0.mask, spec_tofit0.mask),
-                                                            roi.freq_mask)
-                roi.freqghz_tofit = ma.masked_array(self.cfreqs, mask_tofit)
-                roi.spec_tofit = ma.masked_array(spec, mask_tofit)
-                roi.tb_max_tofit = ma.masked_array(roi.tb_max, mask_tofit)
-                roi.total_flux_tofit = ma.masked_array(roi.total_flux, mask_tofit)
-
-                if self.has_bkg:
-                    roi.spec_err_tofit = ma.masked_array(spec_err, roi.mask_tofit)
-                    roi.tb_rms_tofit = ma.masked_array(self.bkg_roi.tb_rms, roi.mask_tofit)
-
-    def init_pgdistspec_widget(self):
-        """Use Pyqtgraph's PlotWidget for the distance-spectral plot"""
-        plot = pg.PlotItem(labels={'bottom': ('Frequency [GHz]', ''), 'left': ('Distance [arcsec]', '')})
-        self.distSpecCanvasSet[self.new_roi.roi_id] = pg.ImageView(view=plot)
-        self.specplotarea.insertWidget(0, self.distSpecCanvasSet[self.new_roi.roi_id])
-        for i in range(self.specplotarea.count()):
-            self.specplotarea.setStretch(i, 1)
-
-    def update_pgspec(self):
-        """Use Pyqtgraph's PlotWidget for the spectral plot"""
-        self.speccanvas.clear()
-        if self.spec_in_tb:
-            spec_bound = self.tb_spec_bound
-        else:
-            spec_bound = self.flx_spec_bound
-        self.speccanvas.setLimits(yMin=np.log10(spec_bound[0]), yMax=np.log10(spec_bound[1]))
-        self.plot_pgspec()
-        self.pgspec_add_boundbox()
-
-    def update_rois_on_canvas(self):
-        plot_item = self.pg_img_canvas.getView()
-        for item in plot_item.items:
-            if item.__class__.__module__ == pg.graphicsItems.ROI.__name__:
-                self.pg_img_canvas.getView().removeItem(item)
-        for current_roi in self.rois[self.roi_group_idx]:
-            self.pg_img_canvas.getView().addItem(current_roi)
-        self.pg_img_canvas.update()
-        ##todo: not all the rois on the canvas can not be removed, seems to be random
-
-    def plot_pgspec(self):
-        self.update_fitmask()
-        if self.spec_in_tb:
-            spec_bound = self.tb_spec_bound
-        else:
-            spec_bound = self.flx_spec_bound
-
-        self.spec_dataplots = []
-        self.spec_dataplots_tofit = []
-        self.spec_rmsplots = []
-        current_roi_group = self.rois[self.roi_group_idx]
-        for n, roi in enumerate(current_roi_group):
-            if roi.type == "sliceROI":
-                if self.spec_in_tb:
-                    spectrogram = roi.tb_im
-                else:
-                    spectrogram = roi.tb_im_flux
-                im_pix_siz = np.nanmean([self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
-                self.distSpecCanvasSet[roi.roi_id].clear()
-                self.distSpecCanvasSet[roi.roi_id].setImage(spectrogram.T, pos=[self.cfreqs[0], 0],
-                                                            scale=[np.nanmean(np.diff(self.cfreqs)), im_pix_siz])
-                self.distSpecCanvasSet[roi.roi_id].setColorMap(self.pgcmap)
-                view = self.distSpecCanvasSet[roi.roi_id].getView()
-                view.invertY(False)
-                view.setAspectLocked(False)
-                nf_sub, nd_sub = spectrogram.shape
-                view.setLimits(xMin=self.cfreqs[0], xMax=self.cfreqs[-1], yMin=0, yMax=nd_sub * im_pix_siz)
+        if self.qlookimgbutton.isChecked():
+            self.qlookimg_canvas = FigureCanvas(Figure(figsize=(6, 4)))
+            self.qlookimg_toolbar = NavigationToolbar(self.qlookimg_canvas, self)
+            self.qlookimg_axs = [self.qlookimg_canvas.figure.subplots(1, 1)]
+            self.qlookimgbox.addWidget(self.qlookimg_canvas)
+            self.qlookimgbox.addWidget(self.qlookimg_toolbar)
+            self.qlookimgbutton.setArrowType(Qt.DownArrow)
+            self.plot_qlookmap()
+            if self.qlookdspecbutton.isChecked():
+                self.qlookimgbox.parent().setStretch(0, 1)
+                self.qlookimgbox.parent().setStretch(1, 2)
+                self.qlookimgbox.parent().setStretch(2, 0)
             else:
-                if n == self.current_roi_idx or (n == len(current_roi_group) + self.current_roi_idx):
-                    symbolfill = (n, 9)
-                else:
-                    symbolfill = None
-                if self.spec_in_tb:
-                    spec = roi.tb_max
-                    spec_bound = self.tb_spec_bound
-                else:
-                    spec = roi.total_flux
-                    spec_bound = self.flx_spec_bound
-                if ma.is_masked(roi.freqghz):
-                    log_freqghz = np.log10(roi.freqghz.compressed())
-                    log_spec = np.log10(spec.compressed())
-                else:
-                    log_freqghz = np.log10(roi.freqghz)
-                    log_spec = np.log10(spec)
-                spec_dataplot = self.speccanvas.plot(x=log_freqghz, y=log_spec, pen=None,
-                                                     symbol='o', symbolPen=(n, 9), symbolBrush=None)
-                spec_dataplot_tofit = self.speccanvas.plot(x=np.log10(roi.freqghz_tofit.compressed()),
-                                                           y=np.log10(roi.spec_tofit.compressed()),
-                                                           pen=None,
-                                                           symbol='o', symbolPen=(n, 9), symbolBrush=symbolfill)
+                self.qlookimgbox.parent().setStretch(0, 0)
+                self.qlookimgbox.parent().setStretch(0, 0)
+                self.qlookimgbox.parent().setStretch(1, 0)
+        else:
+            self.qlookimgbutton.setArrowType(Qt.RightArrow)
+            self.qlookimgbox.parent().setStretch(0, 0)
+            self.qlookimgbox.parent().setStretch(0, 0)
+            self.qlookimgbox.parent().setStretch(1, 0)
 
-                self.speccanvas.addItem(spec_dataplot)
-                self.speccanvas.addItem(spec_dataplot_tofit)
-                self.spec_dataplots.append(spec_dataplot)
-                self.spec_dataplots_tofit.append(spec_dataplot_tofit)
-                # print('ROI', n)
-                # print(roi.freqghz_tofit.compressed())
-                # print(roi.spec_tofit.compressed())
-
-                # Add errorbar if rms is defined
-                if self.has_bkg:
-                    # define error in spectrum
-                    if self.spec_in_tb:
-                        spec_rms = self.bkg_roi.tb_rms
-                    else:
-                        spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
-                                                  area=roi.total_area * u.arcsec ** 2, reverse=True).value
-                    # add fractional err in quadrature
-                    spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
-                    spec_rmsplot = self.speccanvas.plot(x=np.log10(self.cfreqs), y=np.log10(spec_rms), pen='k',
-                                                        symbol='d', symbolPen='k', symbolBrush=None)
-                    self.speccanvas.addItem(spec_rmsplot)
-                    self.spec_rmsplots.append(spec_rmsplot)
-                else:
-                    spec_err = (self.spec_frac_err * spec) ** 2.
-                err_bounds_min = np.maximum(spec - spec_err, np.ones_like(spec) * spec_bound[0])
-                err_bounds_max = spec + spec_err
-                errplot = pg.ErrorBarItem(x=np.log10(roi.freqghz), y=np.log10(spec),
-                                          top=np.log10(err_bounds_max) - np.log10(spec),
-                                          bottom=np.log10(spec) - np.log10(err_bounds_min), beam=0.025, pen=(n, 9))
-
-                self.speccanvas.addItem(errplot)
-
-            self.fbar = self.speccanvas.plot(x=np.log10([self.pg_img_canvas.timeLine.getXPos()] * 2),
-                                             y=[np.log10(spec_bound[0]), np.log10(spec_bound[1])], pen='k')
-            self.speccanvas.addItem(self.fbar)
-            self.speccanvas.setLimits(yMin=np.log10(spec_bound[0]), yMax=np.log10(spec_bound[1]))
-            xax = self.speccanvas.getAxis('bottom')
-            yax = self.speccanvas.getAxis('left')
-            xax.setLabel("Frequency [GHz]")
-            if self.spec_in_tb:
-                yax.setLabel("Brightness Temperature [MK]")
+    def showqlookdspec_ori(self):
+        for i in range(self.qlookdspecbox.count()):
+            self.qlookdspecbox.itemAt(i).widget().deleteLater()
+        if self.qlookdspecbutton.isChecked():
+            self.qlookdspec_canvas = FigureCanvas(Figure(figsize=(6, 4)))
+            self.qlookdspec_toolbar = NavigationToolbar(self.qlookdspec_canvas, self)
+            self.qlookdspec_ax = self.qlookdspec_canvas.figure.subplots(1, 1)
+            self.qlookdspecbox.addWidget(self.qlookdspec_canvas)
+            self.qlookdspecbox.addWidget(self.qlookdspec_toolbar)
+            self.qlookdspecbutton.setArrowType(Qt.DownArrow)
+            if self.qlookimgbutton.isChecked():
+                self.qlookdspecbox.parent().setStretch(0, 1)
+                self.qlookdspecbox.parent().setStretch(1, 2)
+                self.qlookdspecbox.parent().setStretch(2, 0)
             else:
-                yax.setLabel("Flux Density [sfu]")
-            xax.setTicks([self.xticks, self.xticks_minor])
-            yax.setTicks([self.yticks, self.yticks_minor])
-
-    def pgspec_add_boundbox(self):
-        # add frequency bound
-        self.rgn_freq_bound = pg.LinearRegionItem(brush=(20, 50, 200, 20))
-        self.rgn_freq_bound.setZValue(10)
-        self.rgn_freq_bound.setRegion([np.log10(self.fit_freq_bound[0]), np.log10(self.fit_freq_bound[1])])
-        self.speccanvas.addItem(self.rgn_freq_bound)
-        self.rgn_freq_bound.sigRegionChangeFinished.connect(self.update_freq_bound_rgn)
-
-    def update_fbar(self):
-        if self.fbar is not None:
-            try:
-                self.speccanvas.removeItem(self.fbar)
-                self.fbar = self.speccanvas.plot(x=np.log10([self.pg_img_canvas.timeLine.getXPos()] * 2), y=[1, 15],
-                                                 pen='k')
-                self.speccanvas.addItem(self.fbar)
-            except:
-                pass
+                self.qlookdspecbox.parent().setStretch(0, 0)
+                self.qlookdspecbox.parent().setStretch(1, 0)
+                self.qlookdspecbox.parent().setStretch(2, 0)
+            if self.has_dspec:
+                self.plot_dspec()
+        else:
+            self.qlookdspecbutton.setArrowType(Qt.RightArrow)
+            self.qlookdspecbox.parent().setStretch(0, 0)
+            self.qlookdspecbox.parent().setStretch(1, 0)
+            self.qlookdspecbox.parent().setStretch(2, 0)
 
     #    def bkg_rgn_select(self):
     #        """Select a region to calculate rms on spectra"""
@@ -1520,46 +1566,276 @@ class App(QMainWindow):
     #            self.bkg_selection_button.setStyleSheet("background-color : lightgrey")
     #            self.pg_img_canvas.removeItem(self.bkg_roi)
 
-    def bkg_rgn_update(self):
-        """Select a region to calculate rms on spectra"""
-        bkg_subim = self.bkg_roi.getArrayRegion(self.pgdata, self.pg_img_canvas.getImageItem(), axes=(1, 2))
-        nf_bkg, ny_bkg, nx_bkg = bkg_subim.shape
-        if self.bkg_roi.pos()[1] < self.y0 + self.ysiz * 0.1:
-            self.bkg_roi_label.setAnchor((0, 1))
-        else:
-            self.bkg_roi_label.setAnchor((0, 0))
-        # if self.bkg_roi.pos()[1] < self.y0 + self.ysiz * 0.1:
-        self.bkg_roi.freqghz = self.cfreqs
-        self.bkg_roi.tb_mean = np.nanmean(bkg_subim, axis=(1, 2))
-        self.bkg_roi.tb_rms = np.std(bkg_subim, axis=(1, 2))
-        self.bkg_roi.tb_max = np.nanmax(bkg_subim, axis=(1, 2))
-        self.bkg_roi.total_pix = ny_bkg * nx_bkg
-        # Total area of the ROI in arcsec^2
-        self.bkg_roi.total_area = self.bkg_roi.total_pix * self.meta['header']['CDELT1'] * self.meta['header']['CDELT2']
-        # Total flux of the ROI in sfu
-        self.bkg_roi.total_flux = gstools.sfu2tb(self.bkg_roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_mean * u.K,
-                                                 area=self.bkg_roi.total_area * u.arcsec ** 2, reverse=True).value
-        self.pg_img_bkg_roi_info_widget.setText('[Background] freq: {0:.2f} GHz, '
-                                                'T<sub>B</sub><sup>rms</sup>: {1:.2f} MK, '
-                                                'T<sub>B</sub><sup>mean</sup>: {2:.2f} MK, Flux: {3:.2f} sfu'.
-                                                format(self.pg_freq_current,
-                                                       self.bkg_roi.tb_rms[self.pg_freq_idx] / 1e6,
-                                                       self.bkg_roi.tb_mean[self.pg_freq_idx] / 1e6,
-                                                       self.bkg_roi.total_flux[self.pg_freq_idx]))
-        # self.bkg_roi_label = pg.TextItem("Background", anchor=(0, 0), color='w')
-        # self.bkg_roi_label.setParentItem(self.bkg_roi)
-        self.update_pgspec()
+    def showqlookdspec(self):
+        """
+        Show/hide dynamic spectrum quick-look panel with background subtraction controls.
+        """
+        for i in range(self.qlookdspecbox.count()):
+            self.qlookdspecbox.itemAt(i).widget().deleteLater()
 
-    def findlastsliceROI(self):
-        roi_type_list = [roi.type for roi in self.rois[self.roi_group_idx]][::-1]
-        if "sliceROI" in roi_type_list:
-            return self.rois[self.roi_group_idx][::-1][roi_type_list.index("sliceROI")]
+        if self.qlookdspecbutton.isChecked():
+            self.qlookdspec_canvas = FigureCanvas(Figure(figsize=(6, 4)))
+            self.qlookdspec_toolbar = NavigationToolbar(self.qlookdspec_canvas, self)
+            self.qlookdspec_ax = self.qlookdspec_canvas.figure.subplots(1, 1)
+
+            # Add background subtraction controls
+            bkg_control_layout = QHBoxLayout()
+            bkg_control_widget = QWidget()
+            bkg_control_widget.setLayout(bkg_control_layout)
+
+            self.dspec_bkg_status_label = QLabel("Dynamic spectrum ready")
+            self.dspec_bkg_ok_button = QPushButton("OK - Apply Background Subtraction")
+            self.dspec_bkg_reset_button = QPushButton("Reset")
+
+            self.dspec_bkg_ok_button.setEnabled(False)
+            self.dspec_bkg_reset_button.setEnabled(False)
+
+            # Connect buttons
+            self.dspec_bkg_ok_button.clicked.connect(self.apply_dspec_background_subtraction)
+            self.dspec_bkg_reset_button.clicked.connect(self.reset_dspec_background_subtraction)
+
+            bkg_control_layout.addWidget(self.dspec_bkg_status_label)
+            bkg_control_layout.addWidget(self.dspec_bkg_ok_button)
+            bkg_control_layout.addWidget(self.dspec_bkg_reset_button)
+
+            self.qlookdspecbox.addWidget(self.qlookdspec_canvas)
+            self.qlookdspecbox.addWidget(self.qlookdspec_toolbar)
+            self.qlookdspecbox.addWidget(bkg_control_widget)
+
+            self.qlookdspecbutton.setArrowType(Qt.DownArrow)
+
+            # Layout adjustments
+            if self.qlookimgbutton.isChecked():
+                self.qlookdspecbox.parent().setStretch(0, 1)
+                self.qlookdspecbox.parent().setStretch(1, 2)
+                self.qlookdspecbox.parent().setStretch(2, 0)
+            else:
+                self.qlookdspecbox.parent().setStretch(0, 0)
+                self.qlookdspecbox.parent().setStretch(1, 0)
+                self.qlookdspecbox.parent().setStretch(2, 0)
+
+            if self.has_dspec:
+                self.plot_dspec()
+                # Initialize background subtraction workflow
+                self.interactive_dspec_background_subtraction()
         else:
-            return None
+            self.qlookdspecbutton.setArrowType(Qt.RightArrow)
+            self.qlookdspecbox.parent().setStretch(0, 0)
+            self.qlookdspecbox.parent().setStretch(1, 0)
+            self.qlookdspecbox.parent().setStretch(2, 0)
+
+
+    def interactive_dspec_background_subtraction(self):
+        """Handle interactive background subtraction workflow for dynamic spectrum."""
+        if not hasattr(self, 'dspec') or not self.has_dspec:
+            self.statusBar.showMessage('No dynamic spectrum loaded.')
+            return
+
+        # Initialize background subtraction state
+        self.bkg_time_range = []
+        self.dspec_original = self.dspec['dspec'].copy()
+        self.bkg_subtraction_active = True
+
+        # Connect the click handler
+        if hasattr(self, 'qlookdspec_canvas'):
+            self.dspec_click_cid = self.qlookdspec_canvas.mpl_connect('button_press_event',
+                                                                      self.dspec_time_click_handler)
+
+        # Update GUI
+        if hasattr(self, 'dspec_bkg_ok_button'):
+            self.dspec_bkg_ok_button.setEnabled(False)
+            self.dspec_bkg_status_label.setText("Click two points on time axis to select background range")
+        self.statusBar.showMessage('Select background time range by clicking on dynamic spectrum')
+
+    def dspec_time_click_handler_ori(self, event):
+        """
+        Handle mouse clicks on dynamic spectrum for background time selection.
+
+        Args:
+            event: matplotlib mouse click event
+        """
+        if not hasattr(self, 'bkg_subtraction_active') or not self.bkg_subtraction_active:
+            return
+
+        if event.inaxes != self.qlookdspec_ax:
+            return
+
+        # Convert click position to time
+        clicked_time = mdates.num2date(event.xdata)
+
+        #debug:
+        print(f"Click detected! Event: {event}")
+        print(f"In axes: {event.inaxes}")
+        print(f"Expected axes: {self.qlookdspec_ax}")
+
+        if not hasattr(self, 'bkg_subtraction_active'):
+            print("No bkg_subtraction_active attribute")
+            return
+
+        if not self.bkg_subtraction_active:
+            print("Background subtraction not active")
+            return
+
+        if event.inaxes != self.qlookdspec_ax:
+            print("Click not in correct axes")
+            return
+
+        print(f"Valid click at x={event.xdata}, y={event.ydata}")
+
+        # Add to time range (max 2 points)
+        if len(self.bkg_time_range) < 2:
+            self.bkg_time_range.append(event.xdata)
+
+            # Visual feedback - add vertical line
+            line = self.qlookdspec_ax.axvline(event.xdata, color='red', linestyle='--', alpha=0.7)
+            if not hasattr(self, 'bkg_selection_lines'):
+                self.bkg_selection_lines = []
+            self.bkg_selection_lines.append(line)
+
+            # Update status
+            if len(self.bkg_time_range) == 1:
+                self.dspec_bkg_status_label.setText(f"First point selected. Click second point.")
+            elif len(self.bkg_time_range) == 2:
+                # Sort time range
+                self.bkg_time_range.sort()
+                start_time = mdates.num2date(self.bkg_time_range[0]).strftime('%H:%M:%S')
+                end_time = mdates.num2date(self.bkg_time_range[1]).strftime('%H:%M:%S')
+                self.dspec_bkg_status_label.setText(f"Background range: {start_time} - {end_time}")
+                self.dspec_bkg_ok_button.setEnabled(True)
+
+            self.qlookdspec_canvas.draw()
+
+    def dspec_time_click_handler(self, event):
+        """Handle mouse clicks on dynamic spectrum for background time selection."""
+
+        print(f"=== CLICK HANDLER CALLED ===")
+        print(f"Event.inaxes: {event.inaxes}")
+        print(f"Expected axes: {self.qlookdspec_ax}")
+        print(f"Are they the same object? {event.inaxes is self.qlookdspec_ax}")
+        print(f"Event x,y data: {event.xdata}, {event.ydata}")
+
+        if not hasattr(self, 'bkg_subtraction_active') or not self.bkg_subtraction_active:
+            print("EXITING: Background subtraction not active")
+            return
+
+        # More reliable axes check - use 'is' instead of '!=' or check if event.xdata is not None
+        if event.inaxes is None or event.xdata is None:
+            print("EXITING: Click not in a valid plot area")
+            return
+
+        # Alternative: You could also just remove this check entirely since we only connect
+        # the handler when background subtraction is active
+
+        print(f"PROCEEDING: Valid click at x={event.xdata}, y={event.ydata}")
+
+        # Convert click position to time
+        clicked_time = mdates.num2date(event.xdata)
+
+        # Add to time range (max 2 points)
+        if len(self.bkg_time_range) < 2:
+            self.bkg_time_range.append(event.xdata)
+            print(f"Added time point: {event.xdata}, total points: {len(self.bkg_time_range)}")
+
+            # Visual feedback - add vertical line
+            line = self.qlookdspec_ax.axvline(event.xdata, color='red', linestyle='--', alpha=0.7)
+            if not hasattr(self, 'bkg_selection_lines'):
+                self.bkg_selection_lines = []
+            self.bkg_selection_lines.append(line)
+
+            # Update status
+            if len(self.bkg_time_range) == 1:
+                self.dspec_bkg_status_label.setText(f"First point selected. Click second point.")
+            elif len(self.bkg_time_range) == 2:
+                # Sort time range
+                self.bkg_time_range.sort()
+                start_time = mdates.num2date(self.bkg_time_range[0]).strftime('%H:%M:%S')
+                end_time = mdates.num2date(self.bkg_time_range[1]).strftime('%H:%M:%S')
+                self.dspec_bkg_status_label.setText(f"Background range: {start_time} - {end_time}")
+                self.dspec_bkg_ok_button.setEnabled(True)
+
+            self.qlookdspec_canvas.draw()
+
+    def apply_dspec_background_subtraction(self):
+        """Calculate and apply background subtraction to dynamic spectrum."""
+        if len(self.bkg_time_range) != 2:
+            self.statusBar.showMessage('Please select background time range first.')
+            return
+
+        # Find time indices for background range
+        time_nums = mdates.date2num(self.dspec['time_axis'].datetime)
+        start_idx = np.argmin(np.abs(time_nums - self.bkg_time_range[0]))
+        end_idx = np.argmin(np.abs(time_nums - self.bkg_time_range[1]))
+
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+
+        # Calculate background average
+        bkg_spectrum = np.mean(self.dspec_original[:, start_idx:end_idx + 1], axis=1, keepdims=True)
+
+        # Apply background subtraction
+        self.dspec['dspec'] = self.dspec_original - bkg_spectrum
+
+        # Update display with 1%-99% percentile range
+        #new_vmin = np.nanpercentile(self.dspec['dspec'].flatten(), 2)
+        #new_vmax = np.nanpercentile(self.dspec['dspec'].flatten(), 98)
+        self.plot_dspec()
+
+        # Clean up selection state
+        self.bkg_subtraction_active = False
+
+        if hasattr(self, 'dspec_click_cid'):
+            self.qlookdspec_canvas.mpl_disconnect(self.dspec_click_cid)
+
+        self.clear_bkg_selection_lines()
+        self.dspec_bkg_ok_button.setEnabled(False)
+        self.dspec_bkg_reset_button.setEnabled(True)
+        self.dspec_bkg_status_label.setText("Background subtracted. Use 'Calculate TP Factor' or reset to try again.")
+        self.statusBar.showMessage('Background subtraction applied to dynamic spectrum.')
+
+    def reset_dspec_background_subtraction(self):
+        """Reset dynamic spectrum to original state for re-selection."""
+        if hasattr(self, 'dspec_original'):
+            self.dspec['dspec'] = self.dspec_original.copy()
+            self.plot_dspec()
+
+        # Reset selection state
+        self.bkg_time_range = []
+        self.clear_bkg_selection_lines()
+        self.dspec_bkg_ok_button.setEnabled(False)
+        self.dspec_bkg_reset_button.setEnabled(False)
+        self.dspec_bkg_status_label.setText("Select new background range")
+        self.bkg_subtraction_active = True
+
+        # Reconnect click handler for new selection
+        if hasattr(self, 'qlookdspec_canvas'):
+            self.dspec_click_cid = self.qlookdspec_canvas.mpl_connect('button_press_event',
+                                                                      self.dspec_time_click_handler)
+
+        self.statusBar.showMessage('Dynamic spectrum reset. Select new background range.')
+
+    def clear_bkg_selection_lines(self):
+        """
+        Remove background selection lines from plot.
+        """
+        if hasattr(self, 'bkg_selection_lines'):
+            for line in self.bkg_selection_lines:
+                line.remove()
+            self.bkg_selection_lines = []
+            self.qlookdspec_canvas.draw()
+
+    # ==================================================================
+    # ======================== ROI MANAGEMENT ============================
+    # ==================================================================
 
     def add_new_roi(self):
+        """
+        Add a new Region of Interest (ROI) to the current group.
 
-        """Add a ROI region to the selection"""
+        Creates ROI based on selected tool type (rectangle, ellipse, polygon, etc.)
+        and handles both regular ROIs and child ROIs for slice analysis.
+        ori:
+        Add a ROI region to the selection
+        """
         self.roi_type = self.toolBarButtonGroup.checkedButton().text()
         ischildROI = False
         if self.add2slice.isChecked():
@@ -1691,7 +1967,7 @@ class App(QMainWindow):
         self.new_roi.sigRemoveRequested.connect(self.remove_ROI)
 
         # choose which group to add
-        #self.add_to_roigroup_selection()
+        # self.add_to_roigroup_selection()
         if self.roi_type in ["LineSegmentROI", "PolyLineROI"]:
             self.new_roi.type = "sliceROI"
             self.new_roi.childROI = {}
@@ -1713,16 +1989,21 @@ class App(QMainWindow):
             self.current_roi_idx = self.nroi_current_group - 1
             self.roi_selection_button.setText(str(self.current_roi_idx))
             self.has_rois = True
-        # self.roi_freq_lowbound_selector.setValue(self.data_freq_bound[0])
-        # self.roi_freq_hibound_selector.setValue(self.data_freq_bound[1])
+            # self.roi_freq_lowbound_selector.setValue(self.data_freq_bound[0])
+            # self.roi_freq_hibound_selector.setValue(self.data_freq_bound[1])
             if self.new_roi.type == "sliceROI":
                 self.init_pgdistspec_widget()
             self.calc_roi_spec(None)
 
         # self.roi_slider_rangechange()
 
-
     def add_pre_defined_roi(self, serialized_rois):
+        """
+        Add ROIs from serialized data (used in batch processing).
+
+        Args:
+            serialized_rois (list): List of serialized ROI strings
+        """
         self.add2slice.setChecked(False)
         self.vis_roi = False
         for roi_str in serialized_rois:
@@ -1731,8 +2012,15 @@ class App(QMainWindow):
             self.add_new_roi()
         delattr(self, 'predefinedroi')
 
-
     def remove_ROI(self, evt):
+        """
+        Remove an ROI from the current group and update displays.
+
+        Args:
+            evt: ROI object to be removed
+
+        Handles cleanup of child ROIs and associated display widgets.
+        """
         if evt.ischildROI:
             evt.parentROI.childROI.pop(evt.childROIkey)
             chilROI = {}
@@ -1772,7 +2060,7 @@ class App(QMainWindow):
         if len(items) > 0:
             self.add_to_roigroup_button.setText(items[0].text())
             self.roi_group_idx = int(items[0].text())
-            if self.roi_group_idx > len(self.rois)-1:
+            if self.roi_group_idx > len(self.rois) - 1:
                 self.rois.append([])
         else:
             self.roi_group_idx = 0
@@ -1810,7 +2098,7 @@ class App(QMainWindow):
         self.nroi_current_group = len(self.rois[self.roi_group_idx])
         self.roi_selection_widget.clear()
         self.roi_selection_widget.addItems([str(i) for i in range(self.nroi_current_group)])
-        self.current_roi_idx = max(self.nroi_current_group - 1,0)
+        self.current_roi_idx = max(self.nroi_current_group - 1, 0)
         self.roi_selection_button.setText(str(self.current_roi_idx))
         self.update_pgspec()
 
@@ -1824,8 +2112,8 @@ class App(QMainWindow):
         # self.grid_dialog = Grid_Dialog(pygsfit_object=self)
         # self.grid_dialog.accepted.connect(self.handle_grid_rois)
         # self.grid_dialog.exec_()
-        #self.grid_dialog = QDialog()
-        ui = Grid_Dialog(self,pygsfit_object=self)
+        # self.grid_dialog = QDialog()
+        ui = Grid_Dialog(self, pygsfit_object=self)
         ui.setupUi(ui)
         ui.data_transmitted.connect(self.handle_grid_rois)
         ui.show()
@@ -1834,8 +2122,16 @@ class App(QMainWindow):
         # self.grid_dialog.show()
         # self.grid_dialog.exec_()
 
-
     def handle_grid_rois(self, recieved_rois):
+        """
+        Process ROIs created from grid dialog.
+
+        Args:
+            recieved_rois: ROI data from grid creation dialog
+
+        Creates multiple ROIs in a grid pattern and manages visibility
+        for large numbers of ROIs.
+        """
         self.vis_roi = True
         if len(recieved_rois[0]) > 20:
             self.vis_roi = False
@@ -1846,14 +2142,14 @@ class App(QMainWindow):
         for cri, crect in enumerate(recieved_rois[0]):
             self.xcen = crect[0][0]
             self.ycen = crect[0][1]
-            self.xsiz = crect[1][0]*20.0
-            self.ysiz = crect[1][1]*20.0
+            self.xsiz = crect[1][0] * 20.0
+            self.ysiz = crect[1][1] * 20.0
             self.add_new_roi()
         self.xsiz, self.ysiz = [self.meta['nx'] * self.dx,
-                                    self.meta['ny'] * self.dy]
+                                self.meta['ny'] * self.dy]
         self.xcen, self.ycen = [(self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0]
         self.grid_rois = self.rois[-1]
-        if len(recieved_rois[0]) >20:
+        if len(recieved_rois[0]) > 20:
             cmsgBox = QMessageBox()
             cmsgBox.setText("ROIs are save, but the number of ROIs > 20, ROIs will not be displayed")
             cmsgBox.addButton("No Problem", QMessageBox.AcceptRole)
@@ -1863,37 +2159,42 @@ class App(QMainWindow):
             self.nroi_current_group = len(self.rois[self.roi_group_idx])
         self.number_grid_rois = len(self.grid_rois)
         self.grid_roi_number_lcd.display(self.number_grid_rois)
-        self.has_grid_rois=True
-        self.pixelized_grid_rois=recieved_rois[1]
+        self.has_grid_rois = True
+        self.pixelized_grid_rois = recieved_rois[1]
         self.roi_group_selection_update()
         self.update_rois_on_canvas()
 
-    def group_of_rois_to_binary_map(self):
-        #convert a group of ROIs to a map filled with task index
-        ##todo convert to binary map for batch mode
-        pass
-
-    def exec_customized_rois_window(self):
-        try:
-            self.customized_rois_Form = QDialog()
-            ui = roiutils.roi_dialog(img_size=[self.meta['nx'], self.meta['ny']], cfreqs=self.cfreqs)
-            ui.setupUi(self.customized_rois_Form)
-            self.customized_rois_Form.show()
-            cur_result = self.customized_rois_Form.exec()
-            crtf_list = ui.getResult(self.customized_rois_Form)
-            return (crtf_list, cur_result)
-        except:
-            msg_box = QMessageBox(QMessageBox.Warning, 'No EOVSA Image Loaded', 'Load EOVSA Image first!')
-            msg_box.exec_()
-
-    def add_manually_defined_rois(self):
-        dialog_output = self.exec_customized_rois_window()
-        if not dialog_output[1] or len(dialog_output[0]) == 0:
-            print('No ROI is added!')
+    def findlastsliceROI(self):
+        roi_type_list = [roi.type for roi in self.rois[self.roi_group_idx]][::-1]
+        if "sliceROI" in roi_type_list:
+            return self.rois[self.roi_group_idx][::-1][roi_type_list.index("sliceROI")]
         else:
-            roiutils.add_md_rois(self, inp_str_list=dialog_output[0])
+            return None
+
+    def update_rois_on_canvas(self):
+        plot_item = self.pg_img_canvas.getView()
+        for item in plot_item.items:
+            if item.__class__.__module__ == pg.graphicsItems.ROI.__name__:
+                self.pg_img_canvas.getView().removeItem(item)
+        for current_roi in self.rois[self.roi_group_idx]:
+            self.pg_img_canvas.getView().addItem(current_roi)
+        self.pg_img_canvas.update()
+        ##todo: not all the rois on the canvas can not be removed, seems to be random
+
+    # ==================================================================
+    # ========== SPECTRAL ANALYSIS AND PLOTTING ==========
+    # ==================================================================
 
     def calc_roi_spec(self, evt):
+        """
+        Calculate spectral properties for ROI(s) when region changes.
+
+        Args:
+            evt: ROI object that triggered the update (None for all ROIs)
+
+        Computes brightness temperature, flux density, and statistical properties
+        for the selected ROI region across all frequencies.
+        """
         # print('=================Update ROI SPEC===============')
         # roi = self.rois[self.roi_group_idx][self.current_roi_idx]
         # roi = self.new_roi
@@ -1970,21 +2271,265 @@ class App(QMainWindow):
         if self.update_gui:
             if 'roi' in vars():
                 self.roi_info.setText('[Current ROI] xcen: {0:6.1f}", ycen: {1:6.1f}", '
-                                  'xwid: {2:6.1f}", ywid: {3:6.1f}", '
-                                  'freq: {4:4.1f} GHz, '
-                                  'T<sub>B</sub><sup>max</sup>: {5:5.1f} MK, '
-                                  'T<sub>B</sub><sup>mean</sup>: {6:5.1f} MK, Flux: {6:5.1f} sfu'.
-                                  format(roi.pos()[0] + roi.size()[0] / 2, roi.pos()[1] + roi.size()[1] / 2,
-                                         roi.size()[0], roi.size()[1],
-                                         self.pg_freq_current,
-                                         roi.tb_max[self.pg_freq_idx] / 1e6,
-                                         roi.tb_mean[self.pg_freq_idx] / 1e6,
-                                         roi.total_flux[self.pg_freq_idx]))
-        # self.update_fitmask()
+                                      'xwid: {2:6.1f}", ywid: {3:6.1f}", '
+                                      'freq: {4:4.1f} GHz, '
+                                      'T<sub>B</sub><sup>max</sup>: {5:5.1f} MK, '
+                                      'T<sub>B</sub><sup>mean</sup>: {6:5.1f} MK, Flux: {6:5.1f} sfu'.
+                                      format(roi.pos()[0] + roi.size()[0] / 2, roi.pos()[1] + roi.size()[1] / 2,
+                                             roi.size()[0], roi.size()[1],
+                                             self.pg_freq_current,
+                                             roi.tb_max[self.pg_freq_idx] / 1e6,
+                                             roi.tb_mean[self.pg_freq_idx] / 1e6,
+                                             roi.total_flux[self.pg_freq_idx]))
+            # self.update_fitmask()
             self.update_pgspec()
+
+    def update_fitmask(self):
+        """
+        Update frequency and intensity masks for spectral fitting.
+
+        Creates masks based on frequency bounds, intensity thresholds, and
+        error criteria to determine which data points to include in fits.
+        """
+        # update fit mask and the values for currently selected roi group
+        if self.has_rois:
+            for roi in self.rois[self.roi_group_idx]:
+                # define error in spectrum
+                if self.spec_in_tb:
+                    spec = roi.tb_max
+                    spec_bound = self.tb_spec_bound
+                    spec_rms = self.bkg_roi.tb_rms
+                else:
+                    spec = roi.total_flux
+                    spec_bound = self.flx_spec_bound
+                    spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
+                                              area=roi.total_area * u.arcsec ** 2, reverse=True).value
+                # add fractional err in quadrature
+                spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+
+                spec_tofit0 = ma.masked_less_equal(spec, spec_bound[0])
+                freqghz_tofit0 = ma.masked_outside(self.cfreqs, self.fit_freq_bound[0], self.fit_freq_bound[1])
+                roi.mask_tofit = mask_tofit = np.logical_or(np.logical_or(freqghz_tofit0.mask, spec_tofit0.mask),
+                                                            roi.freq_mask)
+                roi.freqghz_tofit = ma.masked_array(self.cfreqs, mask_tofit)
+                roi.spec_tofit = ma.masked_array(spec, mask_tofit)
+                roi.tb_max_tofit = ma.masked_array(roi.tb_max, mask_tofit)
+                roi.total_flux_tofit = ma.masked_array(roi.total_flux, mask_tofit)
+
+                if self.has_bkg:
+                    roi.spec_err_tofit = ma.masked_array(spec_err, roi.mask_tofit)
+                    roi.tb_rms_tofit = ma.masked_array(self.bkg_roi.tb_rms, roi.mask_tofit)
+
+    def init_pgdistspec_widget(self):
+        """
+        Initialize PyQtGraph widget for distance-spectral plots.
+
+        Creates a new ImageView widget for displaying 2D spectral data
+        along slice ROIs (distance vs frequency).
+
+        Use Pyqtgraph's PlotWidget for the distance-spectral plot
+        """
+        plot = pg.PlotItem(labels={'bottom': ('Frequency [GHz]', ''), 'left': ('Distance [arcsec]', '')})
+        self.distSpecCanvasSet[self.new_roi.roi_id] = pg.ImageView(view=plot)
+        self.specplotarea.insertWidget(0, self.distSpecCanvasSet[self.new_roi.roi_id])
+        for i in range(self.specplotarea.count()):
+            self.specplotarea.setStretch(i, 1)
+
+    def update_pgspec(self):
+        """
+        Refresh the spectral plot display with current data and settings.
+
+        Updates plot limits, redraws spectral data, and adds frequency
+        bound selection region.
+
+        Use Pyqtgraph's PlotWidget for the spectral plot
+        """
+        self.speccanvas.clear()
+        if self.spec_in_tb:
+            spec_bound = self.tb_spec_bound
+        else:
+            spec_bound = self.flx_spec_bound
+        self.speccanvas.setLimits(yMin=np.log10(spec_bound[0]), yMax=np.log10(spec_bound[1]))
+        self.plot_pgspec()
+        self.pgspec_add_boundbox()
+
+    def plot_pgspec(self):
+        """
+        Plot spectral data for all ROIs in the current group.
+
+        Displays observed spectra, error bars, fitted data points, and
+        distance-frequency plots for slice ROIs using PyQtGraph.
+        """
+        self.update_fitmask()
+        if self.spec_in_tb:
+            spec_bound = self.tb_spec_bound
+        else:
+            spec_bound = self.flx_spec_bound
+
+        self.spec_dataplots = []
+        self.spec_dataplots_tofit = []
+        self.spec_rmsplots = []
+        current_roi_group = self.rois[self.roi_group_idx]
+        for n, roi in enumerate(current_roi_group):
+            if roi.type == "sliceROI":
+                if self.spec_in_tb:
+                    spectrogram = roi.tb_im
+                else:
+                    spectrogram = roi.tb_im_flux
+                im_pix_siz = np.nanmean([self.meta['header']['CDELT1'], self.meta['header']['CDELT2']])
+                self.distSpecCanvasSet[roi.roi_id].clear()
+                self.distSpecCanvasSet[roi.roi_id].setImage(spectrogram.T, pos=[self.cfreqs[0], 0],
+                                                            scale=[np.nanmean(np.diff(self.cfreqs)), im_pix_siz])
+                self.distSpecCanvasSet[roi.roi_id].setColorMap(self.pgcmap)
+                view = self.distSpecCanvasSet[roi.roi_id].getView()
+                view.invertY(False)
+                view.setAspectLocked(False)
+                nf_sub, nd_sub = spectrogram.shape
+                view.setLimits(xMin=self.cfreqs[0], xMax=self.cfreqs[-1], yMin=0, yMax=nd_sub * im_pix_siz)
+            else:
+                if n == self.current_roi_idx or (n == len(current_roi_group) + self.current_roi_idx):
+                    symbolfill = (n, 9)
+                else:
+                    symbolfill = None
+                if self.spec_in_tb:
+                    spec = roi.tb_max
+                    spec_bound = self.tb_spec_bound
+                else:
+                    spec = roi.total_flux
+                    spec_bound = self.flx_spec_bound
+                if ma.is_masked(roi.freqghz):
+                    log_freqghz = np.log10(roi.freqghz.compressed())
+                    log_spec = np.log10(spec.compressed())
+                else:
+                    log_freqghz = np.log10(roi.freqghz)
+                    log_spec = np.log10(spec)
+                spec_dataplot = self.speccanvas.plot(x=log_freqghz, y=log_spec, pen=None,
+                                                     symbol='o', symbolPen=(n, 9), symbolBrush=None)
+                spec_dataplot_tofit = self.speccanvas.plot(x=np.log10(roi.freqghz_tofit.compressed()),
+                                                           y=np.log10(roi.spec_tofit.compressed()),
+                                                           pen=None,
+                                                           symbol='o', symbolPen=(n, 9), symbolBrush=symbolfill)
+
+                self.speccanvas.addItem(spec_dataplot)
+                self.speccanvas.addItem(spec_dataplot_tofit)
+                self.spec_dataplots.append(spec_dataplot)
+                self.spec_dataplots_tofit.append(spec_dataplot_tofit)
+                # print('ROI', n)
+                # print(roi.freqghz_tofit.compressed())
+                # print(roi.spec_tofit.compressed())
+
+                # Add errorbar if rms is defined
+                if self.has_bkg:
+                    # define error in spectrum
+                    if self.spec_in_tb:
+                        spec_rms = self.bkg_roi.tb_rms
+                    else:
+                        spec_rms = gstools.sfu2tb(roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_rms * u.K,
+                                                  area=roi.total_area * u.arcsec ** 2, reverse=True).value
+                    # add fractional err in quadrature
+                    spec_err = np.sqrt(spec_rms ** 2. + (self.spec_frac_err * spec) ** 2.)
+                    spec_rmsplot = self.speccanvas.plot(x=np.log10(self.cfreqs), y=np.log10(spec_rms), pen='k',
+                                                        symbol='d', symbolPen='k', symbolBrush=None)
+                    self.speccanvas.addItem(spec_rmsplot)
+                    self.spec_rmsplots.append(spec_rmsplot)
+                else:
+                    spec_err = (self.spec_frac_err * spec) ** 2.
+                err_bounds_min = np.maximum(spec - spec_err, np.ones_like(spec) * spec_bound[0])
+                err_bounds_max = spec + spec_err
+                errplot = pg.ErrorBarItem(x=np.log10(roi.freqghz), y=np.log10(spec),
+                                          top=np.log10(err_bounds_max) - np.log10(spec),
+                                          bottom=np.log10(spec) - np.log10(err_bounds_min), beam=0.025, pen=(n, 9))
+
+                self.speccanvas.addItem(errplot)
+
+            self.fbar = self.speccanvas.plot(x=np.log10([self.pg_img_canvas.timeLine.getXPos()] * 2),
+                                             y=[np.log10(spec_bound[0]), np.log10(spec_bound[1])], pen='k')
+            self.speccanvas.addItem(self.fbar)
+            self.speccanvas.setLimits(yMin=np.log10(spec_bound[0]), yMax=np.log10(spec_bound[1]))
+            xax = self.speccanvas.getAxis('bottom')
+            yax = self.speccanvas.getAxis('left')
+            xax.setLabel("Frequency [GHz]")
+            if self.spec_in_tb:
+                yax.setLabel("Brightness Temperature [MK]")
+            else:
+                yax.setLabel("Flux Density [sfu]")
+            xax.setTicks([self.xticks, self.xticks_minor])
+            yax.setTicks([self.yticks, self.yticks_minor])
+
+    def pgspec_add_boundbox(self):
+        # add frequency bound
+        self.rgn_freq_bound = pg.LinearRegionItem(brush=(20, 50, 200, 20))
+        self.rgn_freq_bound.setZValue(10)
+        self.rgn_freq_bound.setRegion([np.log10(self.fit_freq_bound[0]), np.log10(self.fit_freq_bound[1])])
+        self.speccanvas.addItem(self.rgn_freq_bound)
+        self.rgn_freq_bound.sigRegionChangeFinished.connect(self.update_freq_bound_rgn)
+
+    def update_freq_bound_rgn(self):
+        """
+        Update frequency bounds based on interactive region selection.
+
+        Responds to user dragging the frequency bound region and updates
+        fitting masks and GUI controls accordingly.
+        """
+        self.rgn_freq_bound.setZValue(10)
+        min_logfreq, max_logfreq = self.rgn_freq_bound.getRegion()
+        self.fit_freq_bound = [10. ** min_logfreq, 10. ** max_logfreq]
+        self.update_fitmask()
+        self.freq_lowbound_selector.setValue(self.fit_freq_bound[0])
+        self.freq_hibound_selector.setValue(self.fit_freq_bound[1])
+        for spec_dataplot, spec_dataplot_tofit, spec_rmsplot in \
+                zip(self.spec_dataplots, self.spec_dataplots_tofit, self.spec_rmsplots):
+            self.speccanvas.removeItem(spec_dataplot)
+            self.speccanvas.removeItem(spec_dataplot_tofit)
+            self.speccanvas.removeItem(spec_rmsplot)
+        self.plot_pgspec()
+
+    # ==================================================================
+    # ========== BACKGROUND AND CALIBRATION ==========
+    # ==================================================================
+    def bkg_rgn_update(self):
+        """
+        Update background region statistics when ROI changes.
+
+        Calculates mean, RMS, and maximum brightness temperature in the
+        background region for noise estimation and error calculation.
+
+        Select a region to calculate rms on spectra
+        """
+        bkg_subim = self.bkg_roi.getArrayRegion(self.pgdata, self.pg_img_canvas.getImageItem(), axes=(1, 2))
+        nf_bkg, ny_bkg, nx_bkg = bkg_subim.shape
+        if self.bkg_roi.pos()[1] < self.y0 + self.ysiz * 0.1:
+            self.bkg_roi_label.setAnchor((0, 1))
+        else:
+            self.bkg_roi_label.setAnchor((0, 0))
+        # if self.bkg_roi.pos()[1] < self.y0 + self.ysiz * 0.1:
+        self.bkg_roi.freqghz = self.cfreqs
+        self.bkg_roi.tb_mean = np.nanmean(bkg_subim, axis=(1, 2))
+        self.bkg_roi.tb_rms = np.std(bkg_subim, axis=(1, 2))
+        self.bkg_roi.tb_max = np.nanmax(bkg_subim, axis=(1, 2))
+        self.bkg_roi.total_pix = ny_bkg * nx_bkg
+        # Total area of the ROI in arcsec^2
+        self.bkg_roi.total_area = self.bkg_roi.total_pix * self.meta['header']['CDELT1'] * self.meta['header']['CDELT2']
+        # Total flux of the ROI in sfu
+        self.bkg_roi.total_flux = gstools.sfu2tb(self.bkg_roi.freqghz * 1e9 * u.Hz, self.bkg_roi.tb_mean * u.K,
+                                                 area=self.bkg_roi.total_area * u.arcsec ** 2, reverse=True).value
+        self.pg_img_bkg_roi_info_widget.setText('[Background] freq: {0:.2f} GHz, '
+                                                'T<sub>B</sub><sup>rms</sup>: {1:.2f} MK, '
+                                                'T<sub>B</sub><sup>mean</sup>: {2:.2f} MK, Flux: {3:.2f} sfu'.
+                                                format(self.pg_freq_current,
+                                                       self.bkg_roi.tb_rms[self.pg_freq_idx] / 1e6,
+                                                       self.bkg_roi.tb_mean[self.pg_freq_idx] / 1e6,
+                                                       self.bkg_roi.total_flux[self.pg_freq_idx]))
+        # self.bkg_roi_label = pg.TextItem("Background", anchor=(0, 0), color='w')
+        # self.bkg_roi_label.setParentItem(self.bkg_roi)
+        self.update_pgspec()
 
     def combine_roi_group_flux(self):
         """
+            Combine flux density from all ROIs in the selected group.
+            Computes total flux by taking maximum values across ROI group
+            and creates a combined spectrum plot for calibration purposes.
+
         Function to combine flux density of a selected ROI group
         @return:
             self.img_tot_fghz: a masked array of frequencies of the selected ROI group
@@ -2020,43 +2565,170 @@ class App(QMainWindow):
                                                               symbol=None, symbolBrush=None)
                 self.speccanvas.addItem(self.img_tot_flux_plot)
 
+    # def calc_tpcal_factor(self):
+    #     """
+    #     Calculate total power calibration factor.
+    #
+    #     Compares combined ROI flux with calibrated total power dynamic
+    #     spectrum to derive frequency-dependent calibration factors.
+    #     """
+    #     # find out and plot total power spectrum at the given time
+    #     self.spec_in_tb = False
+    #     if hasattr(self, 'eoimg_date') and hasattr(self, 'dspec') and self.is_calibrated_tp:
+    #         t_idx = np.argmin(np.abs(self.dspec['time_axis'] - self.eoimg_date))
+    #         self.tp_spec = self.dspec['dspec'][:, t_idx]
+    #         self.tp_fghz = self.dspec['freq_axis']
+    #         if hasattr(self, 'tp_flux_plot'):
+    #             self.speccanvas.removeItem(self.tp_flux_plot)
+    #         else:
+    #             self.tp_flux_plot = self.speccanvas.plot(x=np.log10(self.tp_fghz), y=np.log10(self.tp_spec),
+    #                                                      pen=dict(color='k', width=8),
+    #                                                      symbol=None, symbolBrush=None)
+    #             self.speccanvas.addItem(self.tp_flux_plot)
+    #         if hasattr(self, 'img_tot_flux') and hasattr(self, 'img_tot_fghz'):
+    #             self.tp_cal_factor = np.ones_like(self.img_tot_flux)
+    #             for n, fghz in enumerate(self.img_tot_fghz):
+    #                 fidx_tp = np.argmin(np.abs(self.tp_fghz - self.img_tot_fghz[n]))
+    #                 self.tp_cal_factor[n] = self.img_tot_flux[n] / self.tp_spec[fidx_tp]
+    #             print('Total Power Calibration Factor updated')
+    #             print(self.tp_cal_factor)
+    #     else:
+    #         print('Either image time or calibrated total power dynamic spectrum does not exist.')
+    #
+    # def apply_tpcal_factor(self):
+    #     """
+    #     Apply or remove total power calibration correction to data.
+    #
+    #     Multiplies or divides image data by calibration factors based on
+    #     checkbox state and updates all ROI calculations.
+    #     """
+    #     if self.apply_tpcal_factor_button.isChecked() == True:
+    #         self.statusBar.showMessage('Apply total power correction factor to data.')
+    #         # self.data[self.pol_select_idx] /= self.tp_cal_factor[:, None, None]
+    #         self.data[self.pol_select_idx] /= self.tp_cal_factor[None, :, None, None]
+    #         self.tpcal_factor_applied = True
+    #         self.calc_roi_spec(None)
+    #     else:
+    #         self.statusBar.showMessage('Unapply total power correction factor to data.')
+    #         # self.data[self.pol_select_idx] *= self.tp_cal_factor[:, None, None]
+    #         self.data[self.pol_select_idx] *= self.tp_cal_factor[None, :, None, None]
+    #         self.tpcal_factor_applied = False
+    #         self.calc_roi_spec(None)
+
     def calc_tpcal_factor(self):
-        # find out and plot total power spectrum at the given time
+        """
+        Calculate total power calibration factor using current ROI flux.
+
+        Compares current ROI flux with calibrated total power dynamic spectrum
+        to derive frequency-dependent calibration factors. Applies 1%-99%
+        normalization for display.
+        """
         self.spec_in_tb = False
         if hasattr(self, 'eoimg_date') and hasattr(self, 'dspec') and self.is_calibrated_tp:
+            # Check if background subtraction was applied
+            if not hasattr(self, 'dspec_original'):
+                self.statusBar.showMessage('Warning: Using raw spectrum. Consider background subtraction first.')
+
+            # Get current ROI flux
+            current_roi = self.rois[self.roi_group_idx][self.current_roi_idx]
+            self.img_tot_flux = current_roi.total_flux
+            self.img_tot_fghz = current_roi.freqghz
+
+            # Get total power spectrum at image time (background-subtracted if available)
             t_idx = np.argmin(np.abs(self.dspec['time_axis'] - self.eoimg_date))
             self.tp_spec = self.dspec['dspec'][:, t_idx]
             self.tp_fghz = self.dspec['freq_axis']
+        #self.spec_in_tb = False
+        # if hasattr(self, 'eoimg_date') and hasattr(self, 'dspec') and self.is_calibrated_tp:
+        #     # Get current ROI flux
+        #     current_roi = self.rois[self.roi_group_idx][self.current_roi_idx]
+        #     self.img_tot_flux = current_roi.total_flux
+        #     self.img_tot_fghz = current_roi.freqghz
+        #
+        #     # Get total power spectrum at image time
+        #     t_idx = np.argmin(np.abs(self.dspec['time_axis'] - self.eoimg_date))
+        #     self.tp_spec = self.dspec['dspec'][:, t_idx]
+        #     self.tp_fghz = self.dspec['freq_axis']
+
+            # Plot normalized spectrum
             if hasattr(self, 'tp_flux_plot'):
                 self.speccanvas.removeItem(self.tp_flux_plot)
-            else:
-                self.tp_flux_plot = self.speccanvas.plot(x=np.log10(self.tp_fghz), y=np.log10(self.tp_spec),
-                                                         pen=dict(color='k', width=8),
-                                                         symbol=None, symbolBrush=None)
-                self.speccanvas.addItem(self.tp_flux_plot)
-            if hasattr(self, 'img_tot_flux') and hasattr(self, 'img_tot_fghz'):
-                self.tp_cal_factor = np.ones_like(self.img_tot_flux)
-                for n, fghz in enumerate(self.img_tot_fghz):
-                    fidx_tp = np.argmin(np.abs(self.tp_fghz - self.img_tot_fghz[n]))
-                    self.tp_cal_factor[n] = self.img_tot_flux[n] / self.tp_spec[fidx_tp]
-                print('Total Power Calibration Factor updated')
-                print(self.tp_cal_factor)
+
+            self.tp_flux_plot = self.speccanvas.plot(x=np.log10(self.tp_fghz),
+                                                     y=np.log10(self.tp_spec),
+                                                     pen=dict(color='k', width=8),
+                                                     symbol=None, symbolBrush=None)
+            self.speccanvas.addItem(self.tp_flux_plot)
+
+            # Calculate calibration factor
+            self.tp_cal_factor = np.ones_like(self.img_tot_flux)
+            for n, fghz in enumerate(self.img_tot_fghz):
+                fidx_tp = np.argmin(np.abs(self.tp_fghz - fghz))
+                self.tp_cal_factor[n] = self.tp_spec[fidx_tp] / self.img_tot_flux[
+                    n]  # Use original values for calculation
+
+            print('Total Power Calibration Factor updated using current ROI')
+            print(f'ROI index: {self.current_roi_idx}')
+            print(f'Calibration factors: {self.tp_cal_factor}')
         else:
             print('Either image time or calibrated total power dynamic spectrum does not exist.')
 
     def apply_tpcal_factor(self):
-        if self.apply_tpcal_factor_button.isChecked() == True:
-            self.statusBar.showMessage('Apply total power correction factor to data.')
-            #self.data[self.pol_select_idx] /= self.tp_cal_factor[:, None, None]
-            self.data[self.pol_select_idx] /= self.tp_cal_factor[None, :, None, None]
-            self.tpcal_factor_applied = True
-            self.calc_roi_spec(None)
+        """Apply or remove total power calibration correction to data."""
+        if not hasattr(self, 'tp_cal_factor'):
+            self.statusBar.showMessage('No calibration factor available. Calculate factor first.')
+            self.apply_tpcal_factor_button.setChecked(False)
+            return
+
+        if self.apply_tpcal_factor_button.isChecked():
+            # Apply correction factor - MULTIPLY to scale up
+            if not (hasattr(self, 'tpcal_factor_applied') and self.tpcal_factor_applied):
+                self.statusBar.showMessage('Applying total power correction factor.')
+                self.data[self.pol_select_idx] *= self.tp_cal_factor[None, :, None, None]
+                self.tpcal_factor_applied = True
+            else:
+                self.statusBar.showMessage('Calibration factor already applied.')
         else:
-            self.statusBar.showMessage('Unapply total power correction factor to data.')
-            #self.data[self.pol_select_idx] *= self.tp_cal_factor[:, None, None]
-            self.data[self.pol_select_idx] *= self.tp_cal_factor[None, :, None, None]
-            self.tpcal_factor_applied = False
-            self.calc_roi_spec(None)
+            # Remove correction factor - DIVIDE to restore original
+            if hasattr(self, 'tpcal_factor_applied') and self.tpcal_factor_applied:
+                self.statusBar.showMessage('Removing total power correction factor.')
+                self.data[self.pol_select_idx] /= self.tp_cal_factor[None, :, None, None]
+                self.tpcal_factor_applied = False
+            else:
+                self.statusBar.showMessage('No calibration factor to remove.')
+
+        # Update displays
+        self.plot_pg_eovsamap()
+        self.calc_roi_spec(None)
+        self.update_pgspec()
+
+    def is_calibrated_tp_state(self):
+        """
+        Handle calibrated total power checkbox state change.
+
+        Updates internal flag indicating whether loaded spectrogram
+        represents calibrated total power measurements.
+        """
+        if self.is_calibrated_tp_button.isChecked() == True:
+            self.statusBar.showMessage('Loaded spectrogram is calibrated total power dynamic spectrum.')
+            self.is_calibrated_tp = True
+        else:
+            self.statusBar.showMessage('Loaded spectrogram is *not* calibrated total power dynamic spectrum.')
+            self.is_calibrated_tp = False
+
+    def savedata_state(self):
+        """
+        Handle save data checkbox state change.
+
+        Updates internal flag controlling whether fitting results
+        are automatically saved to files.
+        """
+        if self.savedata_button.isChecked() == True:
+            self.statusBar.showMessage('Saving the fit data')
+            self.savedata = True
+        else:
+            self.statusBar.showMessage('Not saving the fit data')
+            self.savedata = False
 
     # def roi_slider_rangechange(self):
     #    self.roi_select_slider.setMaximum(self.nroi - 1)
@@ -2066,7 +2738,16 @@ class App(QMainWindow):
     #    self.roi_info.setPlainText('Selected ROI {}'.format(self.current_roi_idx))
     #    self.update_pgspec()
 
+    # ==================================================================
+    # ========== PARAMETER CONTROLS AND SETTINGS ==========
+    # ==================================================================
     def roi_freq_lowbound_valuechange(self):
+        """
+        Handle change in ROI frequency lower bound spinbox.
+
+        Updates the frequency range for ROI spectral extraction and
+        refreshes the spectral display.
+        """
         self.roi_freq_bound[0] = self.roi_freq_lowbound_selector.value()
         self.statusBar.showMessage('Selected Lower Frequency Bound for ROI is {0:.1f} GHz'.
                                    format(self.roi_freq_bound[0]))
@@ -2074,6 +2755,12 @@ class App(QMainWindow):
         self.update_pgspec()
 
     def roi_freq_hibound_valuechange(self):
+        """
+        Handle change in ROI frequency upper bound spinbox.
+
+        Updates the frequency range for ROI spectral extraction and
+        refreshes the spectral display.
+        """
         self.roi_freq_bound[1] = self.roi_freq_hibound_selector.value()
         self.statusBar.showMessage('Selected Higher Frequency Bound for ROI is {0:.1f} GHz'.
                                    format(self.roi_freq_bound[1]))
@@ -2081,6 +2768,15 @@ class App(QMainWindow):
         self.update_pgspec()
 
     def update_freq_mask(self, roi):
+
+        """
+        Update frequency mask for a specific ROI.
+
+        Args:
+            roi: ROI object to update
+
+        Applies frequency bounds to mask out data outside the selected range.
+        """
         # unmask everything first
         if ma.is_masked(roi.freqghz):
             roi.freqghz.mask = ma.nomask
@@ -2096,8 +2792,55 @@ class App(QMainWindow):
         roi.tb_mean = ma.masked_array(roi.tb_mean, roi.freq_mask)
         roi.total_flux = ma.masked_array(roi.total_flux, roi.freq_mask)
 
+    def fit_method_selector(self):
+        """
+        Handle fit method selection from dropdown menu.
+
+        Updates fitting algorithm and refreshes method-specific parameter widgets.
+        Handles special case for Fleishman method initialization.
+        """
+        print("Selected Fit Method is: {}".format(self.fit_method_selector_widget.currentText()))
+        self.fit_method = self.fit_method_selector_widget.currentText()
+        self.init_fit_kws()
+        self.update_fit_kws_widgets()
+        if self.fit_method == 'Fleishman':
+            self.fit_Spectrum_Kl_call_preset()
+
     # def roi_grid_size_valuechange(self):
     #     self.roi_grid_size = self.roi_grid_size_selector.value()
+
+    def ele_function_selector(self):
+        """
+        Handle electron distribution function selection.
+
+        Updates the physical model for spectral fitting and reinitializes
+        parameter sets appropriate for the selected distribution.
+        """
+        print("Selected Electron Distribution Function is: {}".format(self.ele_function_selector_widget.currentText()))
+        self.ele_dist = self.ele_function_selector_widget.currentText()
+        self.init_params()
+
+    def tb_flx_btnstate(self):
+        """
+        Handle toggle between brightness temperature and flux density modes.
+
+        Updates spectral plot units, parameter sets, and plot initialization
+        based on selected measurement type.
+        """
+        if self.plot_tb_button.isChecked() == True:
+            self.statusBar.showMessage('Plot Brightness Temperature')
+            self.spec_in_tb = True
+            if 'area_asec2' in self.fit_params.keys():
+                del self.fit_params['area_asec2']
+                self.update_fit_param_widgets()
+        else:
+            self.statusBar.showMessage('Plot Flux Density')
+            self.spec_in_tb = False
+            if not 'area_asec2' in self.fit_params.keys():
+                self.fit_params.add_many(('area_asec2', 25., False, 1., 10000., None, None))
+                self.update_fit_param_widgets()
+        self.init_pgspecplot()
+        self.update_pgspec()
 
     def freq_lowbound_valuechange(self):
         self.fit_freq_bound[0] = self.freq_lowbound_selector.value()
@@ -2111,34 +2854,17 @@ class App(QMainWindow):
         self.spec_frac_err = self.spec_frac_err_selector.value()
         self.update_pgspec()
 
-    def update_freq_bound_rgn(self):
-        self.rgn_freq_bound.setZValue(10)
-        min_logfreq, max_logfreq = self.rgn_freq_bound.getRegion()
-        self.fit_freq_bound = [10. ** min_logfreq, 10. ** max_logfreq]
-        self.update_fitmask()
-        self.freq_lowbound_selector.setValue(self.fit_freq_bound[0])
-        self.freq_hibound_selector.setValue(self.fit_freq_bound[1])
-        for spec_dataplot, spec_dataplot_tofit, spec_rmsplot in \
-                zip(self.spec_dataplots, self.spec_dataplots_tofit, self.spec_rmsplots):
-            self.speccanvas.removeItem(spec_dataplot)
-            self.speccanvas.removeItem(spec_dataplot_tofit)
-            self.speccanvas.removeItem(spec_rmsplot)
-        self.plot_pgspec()
-
-    def fit_method_selector(self):
-        print("Selected Fit Method is: {}".format(self.fit_method_selector_widget.currentText()))
-        self.fit_method = self.fit_method_selector_widget.currentText()
-        self.init_fit_kws()
-        self.update_fit_kws_widgets()
-        if self.fit_method == 'Fleishman':
-            self.fit_Spectrum_Kl_call_preset()
-
-    def ele_function_selector(self):
-        print("Selected Electron Distribution Function is: {}".format(self.ele_function_selector_widget.currentText()))
-        self.ele_dist = self.ele_function_selector_widget.currentText()
-        self.init_params()
+    # ==================================================================
+    # =============== FITTING PARAMETERS AND INITIALIZATION =================
+    # ==================================================================
 
     def init_params(self):
+        """
+        Initialize fitting parameters based on selected electron distribution.
+
+        Sets up lmfit Parameters object with appropriate bounds and initial
+        values for the chosen physical model (powerlaw, thermal, etc.).
+        """
         if self.ele_dist == 'powerlaw':
             self.fit_params = lmfit.Parameters()
             self.fit_params.add_many(('Bx100G', 2., True, 0.1, 100., None, None),
@@ -2162,7 +2888,7 @@ class App(QMainWindow):
             ## todo: thermal free-free cost function to be added
             self.fit_params = lmfit.Parameters()
             self.fit_params.add_many(('Bx100G', 2., True, 0.1, 100., None, None),
-                                        ('theta', 45., True, 0.01, 89.9, None, None),
+                                     ('theta', 45., True, 0.01, 89.9, None, None),
                                      ('log_nth', 10, True, 4., 13., None, None),
                                      ('T_MK', 1., False, 0.1, 100, None, None),
                                      ('depth_asec', 5., False, 1., 100., None, None))
@@ -2189,6 +2915,12 @@ class App(QMainWindow):
             self.update_fit_param_widgets()
 
     def init_fit_kws(self):
+        """
+        Initialize fitting keywords based on selected optimization method.
+
+        Sets default parameters for optimization algorithms including
+        convergence criteria and iteration limits.
+        """
         # first refresh the widgets
         if self.fit_method == 'nelder':
             self.fit_kws = {'maxiter': 2000, 'xatol': 0.01, 'fatol': 0.01}
@@ -2196,9 +2928,15 @@ class App(QMainWindow):
             self.fit_kws = {'niter': 50, 'T': 90., 'stepsize': 0.8,
                             'interval': 25}
         if self.fit_method == 'mcmc':
-            self.fit_kws = {'steps': 1000, 'burn': 300, 'thin': 10, 'workers':8}
+            self.fit_kws = {'steps': 1000, 'burn': 300, 'thin': 10, 'workers': 8}
 
     def update_fit_kws_widgets(self):
+        """
+        Update GUI widgets for fitting keyword parameters.
+
+        Dynamically creates spinboxes and input fields based on the
+        selected fitting method's parameter requirements.
+        """
         # first delete every widget for the fit keywords
         if self.fit_kws_box.count() > 0:
             for n in reversed(range(self.fit_kws_box.count())):
@@ -2229,6 +2967,12 @@ class App(QMainWindow):
             self.fit_kws_box.addWidget(fit_kws_value_widget)
 
     def update_fit_param_widgets(self):
+        """
+        Update GUI widgets for physical fitting parameters.
+
+        Creates grid layout with controls for initial values, bounds,
+        vary flags, and fit results for all model parameters.
+        """
         # first delete every widget for the fit parameters
         if self.fit_param_box.count() > 0:
             for n in reversed(range(self.fit_param_box.count())):
@@ -2286,6 +3030,12 @@ class App(QMainWindow):
             self.param_fit_value_widgets.append(param_fit_value_widget)
 
     def update_fit_kws(self):
+        """
+        Update fitting keywords from GUI widget values.
+
+        Reads current values from dynamically created widgets and
+        updates the fitting keyword dictionary.
+        """
         # print('==========Parameters Updated To the Following=======')
         for n, key in enumerate(self.fit_kws):
             if (isinstance(self.fit_kws_value_widgets[n], QSpinBox)
@@ -2296,6 +3046,12 @@ class App(QMainWindow):
         # print(self.fit_kws)
 
     def update_params(self):
+        """
+        Update fitting parameters from GUI widget values.
+
+        Reads parameter values, bounds, and vary flags from widgets
+        and updates the lmfit Parameters object.
+        """
         # print('==========Parameters Updated To the Following=======')
         self.fit_params_nvarys = 0
         for n, key in enumerate(self.fit_params):
@@ -2308,97 +3064,61 @@ class App(QMainWindow):
                 self.fit_params_nvarys += 1
 
     def update_init_guess(self):
+        """
+        Copy fitting results to initial parameter guess values.
+
+        Updates initial guess widgets with the most recent fit results
+        for iterative fitting improvement.
+        """
         # Paste the fitting result to the initial value
         for n, key in enumerate(self.fit_params):
             self.param_init_value_widgets[n].setValue(self.fit_params_res[key].value)
             self.fit_params[key].init_value = self.fit_params_res[key].value
 
-    def tb_flx_btnstate(self):
-        if self.plot_tb_button.isChecked() == True:
-            self.statusBar.showMessage('Plot Brightness Temperature')
-            self.spec_in_tb = True
-            if 'area_asec2' in self.fit_params.keys():
-                del self.fit_params['area_asec2']
-                self.update_fit_param_widgets()
-        else:
-            self.statusBar.showMessage('Plot Flux Density')
-            self.spec_in_tb = False
-            if not 'area_asec2' in self.fit_params.keys():
-                self.fit_params.add_many(('area_asec2', 25., False, 1., 10000., None, None))
-                self.update_fit_param_widgets()
-        self.init_pgspecplot()
-        self.update_pgspec()
+    # ==================================================================
+    # ========== SPECTRAL FITTING EXECUTION ==========
+    # ==================================================================
 
-    def showqlookimg(self):
-        for i in range(self.qlookimgbox.count()):
-            self.qlookimgbox.itemAt(i).widget().deleteLater()
+    def emcee_lnprob_werr(self, params, freqs, spec=None, spec_err=None, spec_in_tb=True):
+        """
+        Log-probability function for MCMC fitting with error scaling.
 
-        if self.qlookimgbutton.isChecked():
-            self.qlookimg_canvas = FigureCanvas(Figure(figsize=(6, 4)))
-            self.qlookimg_toolbar = NavigationToolbar(self.qlookimg_canvas, self)
-            self.qlookimg_axs = [self.qlookimg_canvas.figure.subplots(1, 1)]
-            self.qlookimgbox.addWidget(self.qlookimg_canvas)
-            self.qlookimgbox.addWidget(self.qlookimg_toolbar)
-            self.qlookimgbutton.setArrowType(Qt.DownArrow)
-            self.plot_qlookmap()
-            if self.qlookdspecbutton.isChecked():
-                self.qlookimgbox.parent().setStretch(0, 1)
-                self.qlookimgbox.parent().setStretch(1, 2)
-                self.qlookimgbox.parent().setStretch(2, 0)
-            else:
-                self.qlookimgbox.parent().setStretch(0, 0)
-                self.qlookimgbox.parent().setStretch(0, 0)
-                self.qlookimgbox.parent().setStretch(1, 0)
-        else:
-            self.qlookimgbutton.setArrowType(Qt.RightArrow)
-            self.qlookimgbox.parent().setStretch(0, 0)
-            self.qlookimgbox.parent().setStretch(0, 0)
-            self.qlookimgbox.parent().setStretch(1, 0)
+        we are not suppling the spec_err here to ensure that
+        we get the original unscaled residuals. We will treat
+        the errors by hand later.
 
-    def showqlookdspec(self):
-        for i in range(self.qlookdspecbox.count()):
-            self.qlookdspecbox.itemAt(i).widget().deleteLater()
-        if self.qlookdspecbutton.isChecked():
-            self.qlookdspec_canvas = FigureCanvas(Figure(figsize=(6, 4)))
-            self.qlookdspec_toolbar = NavigationToolbar(self.qlookdspec_canvas, self)
-            self.qlookdspec_ax = self.qlookdspec_canvas.figure.subplots(1, 1)
-            self.qlookdspecbox.addWidget(self.qlookdspec_canvas)
-            self.qlookdspecbox.addWidget(self.qlookdspec_toolbar)
-            self.qlookdspecbutton.setArrowType(Qt.DownArrow)
-            if self.qlookimgbutton.isChecked():
-                self.qlookdspecbox.parent().setStretch(0, 1)
-                self.qlookdspecbox.parent().setStretch(1, 2)
-                self.qlookdspecbox.parent().setStretch(2, 0)
-            else:
-                self.qlookdspecbox.parent().setStretch(0, 0)
-                self.qlookdspecbox.parent().setStretch(1, 0)
-                self.qlookdspecbox.parent().setStretch(2, 0)
-            if self.has_dspec:
-                self.plot_dspec()
-        else:
-            self.qlookdspecbutton.setArrowType(Qt.RightArrow)
-            self.qlookdspecbox.parent().setStretch(0, 0)
-            self.qlookdspecbox.parent().setStretch(1, 0)
-            self.qlookdspecbox.parent().setStretch(2, 0)
+        Args:
+            params: lmfit Parameters object
+            freqs: frequency array
+            spec: observed spectrum
+            spec_err: spectrum uncertainties
+            spec_in_tb: whether spectrum is in brightness temperature units
 
-
-    def emcee_lnprob_werr(self,params,freqs,spec=None,spec_err=None,spec_in_tb=True):
-        #### we are not suppling the spec_err here to ensure that
-        #### we get the original unscaled residuals. We will treat
-        #### the errors by hand later.
+        Returns:
+            array: log-probability values for MCMC sampling
+        """
         residual_orig = self.fit_function(params, freqs, \
-                            spec=spec, spec_in_tb=spec_in_tb)
+                                          spec=spec, spec_in_tb=spec_in_tb)
         model = residual_orig + spec
         lnf = float(params['lnf'].value)
         inv_sigma2 = 1.0 / (spec_err ** 2. + model ** 2 * np.exp(2 * lnf))
-        num_freqs=freqs.size
-        val=((residual_orig) ** 2 * inv_sigma2 - np.log(inv_sigma2))
+        num_freqs = freqs.size
+        val = ((residual_orig) ** 2 * inv_sigma2 - np.log(inv_sigma2))
         #### lmfit expects an array. But these residuals will anyway be sqaured and summed up
         #### after multiplying with -0.5. So I am passing an array of same numbers
         return val
-        
+
     def do_spec_fit(self, local_roi_idx=None):
-        #update_gui = Flase for paralell fitting
+        """
+        Perform spectral fitting for a single ROI.
+
+        Args:
+            local_roi_idx: index of ROI to fit (None for current selection)
+
+        Executes the selected fitting algorithm and updates displays with results.
+        Handles various fitting methods including Nelder-Mead, basin-hopping, MCMC.
+        """
+        # update_gui = Flase for paralell fitting
         if self.update_gui:
             local_roi_idx = self.current_roi_idx
         roi = self.rois[self.roi_group_idx][local_roi_idx]
@@ -2418,7 +3138,7 @@ class App(QMainWindow):
             if hasattr(self, 'spec_fitplot'):
                 self.speccanvas.removeItem(self.spec_fitplot)
         if self.fit_method == 'Fleishman':
-            #using Dr.Fleishman's code which combine the minimization
+            # using Dr.Fleishman's code which combine the minimization
             exported_fittig_info = []
             self.fit_Spectrum_Kl_input_converter()
             self.fit_Spectrum_Kl_output = gstools.pyWrapper_Fit_Spectrum_Kl(*self.fit_Spectrum_Kl_input)
@@ -2427,10 +3147,10 @@ class App(QMainWindow):
             exported_fittig_info.append(mi)
             print('==========Fit Parameters Updated=======')
             if self.update_gui:
-                #self.fit_params_res = mi.params
+                # self.fit_params_res = mi.params
                 for n, key in enumerate(self.fit_params_res):
                     self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
-            ori_spec_fit_res = np.sum(self.fit_Spectrum_Kl_output[0][0,:,:], axis=1)
+            ori_spec_fit_res = np.sum(self.fit_Spectrum_Kl_output[0][0, :, :], axis=1)
             freqghz_toplot = np.logspace(0, np.log10(20.), 100)
             spec_interpolator = interp1d(self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed(),
                                          ori_spec_fit_res, kind='linear', fill_value='extrapolate')
@@ -2441,10 +3161,10 @@ class App(QMainWindow):
             self.speccanvas.addItem(self.spec_fitplot)
         else:
             cur_fcn_kws = {'spec': spec_tofit, 'spec_err': spec_err_tofit,
-                       'spec_in_tb': self.spec_in_tb}
+                           'spec_in_tb': self.spec_in_tb}
             # todo: double power law has not been deployed yet
             cost_func_list = ["powerlaw", "double_Powerlaw", "thermal f-f + gyrores", "thermal f-f"]
-            arg_list = [{'elec_dist_index':3}, {'elec_dist_index':4}, {'mechanism_index':0}, {'mechanism_index':1}]
+            arg_list = [{'elec_dist_index': 3}, {'elec_dist_index': 4}, {'mechanism_index': 0}, {'mechanism_index': 1}]
             cost_arg_map = dict(zip(cost_func_list, arg_list))
             additional_args = cost_arg_map.get(self.ele_dist)
             cur_fcn_kws.update(additional_args)
@@ -2467,11 +3187,12 @@ class App(QMainWindow):
                         self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
 
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
-                spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb, **additional_args)
+                spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb,
+                                                 **additional_args)
                 if self.update_gui:
                     self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
-                                                         pen=dict(color=pg.mkColor(local_roi_idx), width=4),
-                                                         symbol=None, symbolBrush=None)
+                                                             pen=dict(color=pg.mkColor(local_roi_idx), width=4),
+                                                             symbol=None, symbolBrush=None)
                     self.speccanvas.addItem(self.spec_fitplot)
                 emcee_params = None
             else:
@@ -2484,7 +3205,6 @@ class App(QMainWindow):
                 mi = mini.minimize(method=method, **fit_kws_nelder)
                 fit_params_res = mi.params
                 fit_params_res.add('lnf', value=np.log(0.1), min=np.log(0.001), max=np.log(2))
-                
 
                 burn = self.fit_kws['burn']
                 thin = self.fit_kws['thin']
@@ -2496,7 +3216,7 @@ class App(QMainWindow):
                 mini = lmfit.Minimizer(self.emcee_lnprob_werr, fit_params_res,
                                        fcn_args=(freqghz_tofit,),
                                        fcn_kws={'spec': spec_tofit, 'spec_err': spec_err_tofit,
-                                               'spec_in_tb': self.spec_in_tb},
+                                                'spec_in_tb': self.spec_in_tb},
                                        max_nfev=max_nfev, nan_policy='omit')
                 emcee_params = mini.minimize(method='emcee', **emcee_kws)
                 chain = emcee_params.flatchain
@@ -2505,7 +3225,7 @@ class App(QMainWindow):
                 # use the median value of the mcmc as the init guess to do a nelder fitting again
                 for cpkey in tmp_nelder_params.keys():
                     try:
-                        tmp_nelder_params[cpkey].value=np.median(chain[cpkey][burn:])
+                        tmp_nelder_params[cpkey].value = np.median(chain[cpkey][burn:])
                     except KeyError:
                         pass
 
@@ -2515,25 +3235,26 @@ class App(QMainWindow):
                                        max_nfev=max_nfev, nan_policy='omit')
                 method = 'Nelder'
                 mi = mini.minimize(method=method, **fit_kws_nelder)
-                #self.fit_params_res = emcee_params.params
+                # self.fit_params_res = emcee_params.params
                 self.fit_params_res = mi.params
 
                 print(lmfit.report_fit(emcee_params.params))
 
                 if self.update_gui:
                     for n, key in enumerate(self.fit_params_res):
-                    #for n, key in enumerate(emcee_params.params):
-                        if key=='lnf':
+                        # for n, key in enumerate(emcee_params.params):
+                        if key == 'lnf':
                             continue
                         try:
-                            #self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
+                            # self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
                             self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
-                            #mi.params[key].set(value=np.median(chain[key][burn:]))
+                            # mi.params[key].set(value=np.median(chain[key][burn:]))
                         except KeyError:
                             pass
                 freqghz_toplot = np.logspace(0, np.log10(20.), 100)
                 med_params = copy.deepcopy(mi.params)
-                med_spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb,**additional_args)
+                med_spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb,
+                                                     **additional_args)
                 if self.update_gui:
                     for i in range(burn, shape, thin):
                         for n, key in enumerate(self.fit_params_res):
@@ -2541,20 +3262,22 @@ class App(QMainWindow):
                                 mi.params[key].value = chain[key][i]
                             except KeyError:
                                 pass
-                        spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb, **additional_args)
+                        spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb,
+                                                         **additional_args)
                         self.spec_fitplot = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(spec_fit_res),
                                                                  pen=dict(color=pg.mkColor(local_roi_idx), width=0.5),
                                                                  symbol=None, symbolBrush=None)
                         self.spec_fitplot.setAlpha(0.05, False)
-                        self.spec_fitplot_med = self.speccanvas.plot(x=np.log10(freqghz_toplot), y=np.log10(med_spec_fit_res),
-                                                                 pen=dict(color='k', width=2),
-                                                                 symbol=None, symbolBrush=None)
+                        self.spec_fitplot_med = self.speccanvas.plot(x=np.log10(freqghz_toplot),
+                                                                     y=np.log10(med_spec_fit_res),
+                                                                     pen=dict(color='k', width=2),
+                                                                     symbol=None, symbolBrush=None)
                         self.spec_fitplot_med.setAlpha(1, False)
                         self.speccanvas.addItem(self.spec_fitplot)
                         self.speccanvas.addItem(self.spec_fitplot_med)
 
-                #spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
-                #mi.params = med_params
+                # spec_fit_res = self.fit_function(mi.params, freqghz_toplot, spec_in_tb=self.spec_in_tb)
+                # mi.params = med_params
                 spec_fit_res = med_spec_fit_res
                 exported_fittig_info.append((emcee_params, mi))
 
@@ -2564,16 +3287,99 @@ class App(QMainWindow):
             else:
                 file_write_lock = threading.Lock()
                 with file_write_lock:
-                    #self.save_res_to_hdf5_file(local_roi_idx, mi, freqghz_toplot, spec_fit_res)
+                    # self.save_res_to_hdf5_file(local_roi_idx, mi, freqghz_toplot, spec_fit_res)
                     self.save_res_to_fits_file(local_roi_idx, mi, freqghz_toplot, spec_fit_res, emcee_res=emcee_params)
 
             if not self.update_gui:
                 exported_fittig_info.append(freqghz_toplot)
                 exported_fittig_info.append(self.fit_method)
 
-    def save_res_to_hdf5_file(self, local_roi_idx, minimiz_res, freqghz_toplot ,spec_fit_res):
+    def parallel_fitting(self):
+        """
+        Execute spectral fitting for all ROIs using parallel processing.
+
+        Sets up thread pool, creates fitting tasks for each ROI, and manages
+        progress monitoring for batch processing operations.
+        """
+
+        self.total_tasks = len(self.rois[0])
+
+        self.threadpool.setMaxThreadCount(self.ncpu_spinbox.value())
+        self.fit_threads.clear()
+        self.calc_roi_spec(None)
+        self.update_fitmask()
+        # self.tmp_folder = tempfile.mkdtemp(dir = self.batch_fitting_dir)
+        cur_tmp_folder = self.batch_fitting_dir + '/' + os.path.basename(self.eoimg_fname).replace('.fits', '')
+        if not os.path.exists(cur_tmp_folder):
+            os.mkdir(cur_tmp_folder)
+        self.tmp_folder = cur_tmp_folder
+        self.tmp_save_folder = self.tmp_folder
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setMaximum(self.total_tasks)
+        self.timer.start()
+
+        for croi_idx, croi in enumerate(self.rois[0]):
+            fit_task = gstools.FitTask(self, croi_idx)
+            # fit_task.signals.completed.connect(self.task_completed)
+            # fit_task.completed.connect(self.task_completed)
+            # fit_task.signals.connect(self.task_completed)
+            self.threadpool.start(fit_task)
+        self.threadpool.waitForDone()
+        self.check_tasks_completion()
+
+        # import shutil
+        # shutil.rmtree(self.tmp_folder)
+
+    def check_tasks_completion(self):
+        """
+        Monitor completion status of parallel fitting tasks.
+
+        Checks for completed FITS files and combines results when all
+        tasks are finished. Called periodically by timer.
+        """
+        search_pattern = os.path.join(self.tmp_folder, '*.fits')
+        fit_res_files = glob.glob(search_pattern)
+        # if self.completed_tasks == self.total_tasks:
+        if len(fit_res_files) == self.total_tasks:
+            self.timer.stop()
+            print("{} tasks are finished. ".format(self.total_tasks))
+            final_save = os.path.join(self.batch_fitting_dir,
+                                      os.path.basename(self.eoimg_fname).replace('.fits', '_fit_res.fits'))
+            # self.combine_hdf5_files(final_path=final_save, original_files=hdf5_files)
+            self.combine_fits_files(final_path=final_save, original_files=fit_res_files)
+
+    @pyqtSlot()
+    def task_completed(self):
+        """
+        Handle completion signal from individual fitting tasks.
+
+        Slot function for progress tracking (currently not fully implemented).
+        """
+        print('The slot is working')
+        self.completed_tasks += 1
+        # progress = int((self.completed_tasks / self.total_tasks) * 100)
+        # self.progress_bar.setValue(progress)
+        # self.progress_bar.show()
+
+    # ==================================================================
+    # ========== DATA EXPORT AND SERIALIZATION ==========
+    # ==================================================================
+
+    def save_res_to_hdf5_file(self, local_roi_idx, minimiz_res, freqghz_toplot, spec_fit_res):
+        """
+        Save fitting results to HDF5 format file.
+
+        Args:
+            local_roi_idx: ROI index
+            minimiz_res: fitting result object
+            freqghz_toplot: model frequency array
+            spec_fit_res: model spectrum array
+
+        Stores ROI properties, fit parameters, and spectral data in HDF5 format.
+        """
         ## Surajit
         roi = self.rois[self.roi_group_idx][local_roi_idx]
+
         def create_attr_array(fit_params, mi_params, param_name):
             stderr = mi_params[param_name].stderr if mi_params[
                                                          param_name].stderr is not None else np.nan
@@ -2584,7 +3390,6 @@ class App(QMainWindow):
                 mi_params[param_name].value,
                 stderr
             ])
-
 
         roi_props = (self.rois[self.roi_group_idx][local_roi_idx]).saveState()
         roi_pos = [i for i in roi_props['pos']]
@@ -2640,20 +3445,31 @@ class App(QMainWindow):
                 # hf.close()
 
     def save_res_to_fits_file(self, local_roi_idx, minimiz_res, freqghz_toplot, spec_fit_res, emcee_res=None):
+        """
+        Save fitting results to FITS format file.
+
+        Args:
+            local_roi_idx: ROI index
+            minimiz_res: fitting result object
+            freqghz_toplot: model frequency array
+            spec_fit_res: model spectrum array
+            emcee_res: MCMC results (optional)
+
+        Creates multi-extension FITS file with metadata, parameters, and spectral data.
+        """
         # Create a FITS header with metadata
         roi = self.rois[self.roi_group_idx][local_roi_idx]
         header = fits.Header()
         header['roi_str'] = str(self.serialize_roi(roi))
         header['roi_ang'] = (self.rois[self.roi_group_idx][local_roi_idx]).saveState()['angle']
-        #header['img_file'] = self.eoimg_fname
-        #header['spec_file'] = self.eodspec_fname
+        # header['img_file'] = self.eoimg_fname
+        # header['spec_file'] = self.eodspec_fname
         header['low_freq'] = self.fit_freq_bound[0]
         header['high_freq'] = self.fit_freq_bound[1]
         header['high_freq'] = self.fit_freq_bound[1]
         header['fit_method'] = self.fit_method
         header['fit_function'] = self.ele_dist
         primary_hdu = fits.PrimaryHDU(header=header)
-
 
         def create_parameters_table(fit_params, mi_params):
             param_data = []
@@ -2663,10 +3479,8 @@ class App(QMainWindow):
 
             dtype = [('name', 'S10'), ('value', 'f8'), ('min', 'f8'), ('max', 'f8'), ('vary', 'bool'), ('stderr', 'f8')]
             structured_array = np.array(param_data, dtype=dtype)
-            #return fits.BinTableHDU.from_columns(structured_array)
+            # return fits.BinTableHDU.from_columns(structured_array)
             return structured_array
-
-
 
         if self.spec_in_tb:
             spec = roi.tb_max
@@ -2685,8 +3499,6 @@ class App(QMainWindow):
         params_table = create_parameters_table(self.fit_params, minimiz_res.params)
         params_table_hdu = fits.BinTableHDU(params_table, name='PARAMETERS')
 
-
-
         if self.update_gui:
             filename, ok2 = QFileDialog.getSaveFileName(None, "Save the selected group ()", os.getcwd(),
                                                         "FITS Files (*.fits)")
@@ -2697,28 +3509,32 @@ class App(QMainWindow):
         if ok2 or not self.update_gui:
             print('Fitting results will be saved to: ', filename)
             if emcee_res is not None:
-                self.emcee_save_file = filename.replace('.fits','emcee_res.p')
-                pickle.dump(emcee_res, open(self.emcee_save_file,'wb'),protocol=pickle.HIGHEST_PROTOCOL)
+                self.emcee_save_file = filename.replace('.fits', 'emcee_res.p')
+                pickle.dump(emcee_res, open(self.emcee_save_file, 'wb'), protocol=pickle.HIGHEST_PROTOCOL)
+                #cornor_plot(emcee_res=emcee_res, fitting_res_save=filename)
             # path of the files are to long to be saved in the header, save them into a binary table
-            file_dict = {'img_file': self.eoimg_fname, 'spec_file': self.eodspec_fname, 'emcee_save_file':self.emcee_save_file}
-            fd_keys =   np.array(list(file_dict.keys()))
+            file_dict = {'img_file': self.eoimg_fname, 'spec_file': self.eodspec_fname,
+                         'emcee_save_file': self.emcee_save_file}
+            fd_keys = np.array(list(file_dict.keys()))
             fd_values = np.array(list(file_dict.values()))
             col1 = fits.Column(name='Key', format='120A', array=fd_keys)  # '20A' denotes strings of length 20
             col2 = fits.Column(name='Value', format='120A', array=fd_values)
-            file_path_hdu = fits.BinTableHDU.from_columns([col1,col2])
+            file_path_hdu = fits.BinTableHDU.from_columns([col1, col2])
 
-            #retrive the dictionary from the column:
+            # retrive the dictionary from the column:
             # with fits.open('data.fits') as hdul:
             #     data = hdul[1].data  # Data is usually in the first extension
             # result_dict = {row['Key'].strip(): row['Value'].strip() for row in data}
 
             # Create an HDUList and save to a FITS file
             hdul = fits.HDUList(
-                [primary_hdu, file_path_hdu, observed_spectrum_hdu, error_hdu, obs_freq_hdu, model_freq_hdu, model_spectrum_hdu,
+                [primary_hdu, file_path_hdu, observed_spectrum_hdu, error_hdu, obs_freq_hdu, model_freq_hdu,
+                 model_spectrum_hdu,
                  params_table_hdu])
             hdul.writeto(filename, overwrite=True)
-            cornor_plot(emcee_res=emcee_res, fitting_res_save=filename)
-
+            if emcee_res is not None:
+                self.emcee_save_file = filename.replace('.fits', 'emcee_res.p')
+                cornor_plot(emcee_res=emcee_res, fitting_res_save=filename)
 
         # #just for testing
         # def read_fits_file(filename):
@@ -2734,124 +3550,14 @@ class App(QMainWindow):
         #             print(data)
         # read_fits_file(filename) # for testing
 
-    def update_gui_after_fitting(self):
-        #  this function is currently not in used
-        ##todo: update GUI after spectral fitting to make paralell mode work in the regular GUI mode
-        #pass
-        fitting_info = self.exported_fittig_info
-        if hasattr(self, 'spec_fitplot'):
-            self.speccanvas.removeItem(self.spec_fitplot)
-        #--------
-        if fitting_info[2]!='mcmc':
-            self.fit_params_res = fitting_info[0].params
-            spec_fit_res = self.fit_function(fitting_info[0].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
-            self.spec_fitplot = self.speccanvas.plot(x=fitting_info[1], y=np.log10(spec_fit_res),
-                                                 pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
-                                                 symbol=None, symbolBrush=None)
-            self.speccanvas.addItem(self.spec_fitplot)
-        else:
-            self.fit_params_res = fitting_info[0][0].params
-            chain = fitting_info[0][0].flatchain
-            shape = chain.shape[0]
-            #----------
-            burn = self.fit_kws['burn']
-            thin = self.fit_kws['thin']
-            steps = self.fit_kws['steps']
-            for n, key in enumerate(self.fit_params_res):
-                try:
-                    self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
-                except KeyError:
-                    pass
-            #freqghz_toplot = np.logspace(0, np.log10(20.), 100)
-
-            for i in range(burn, shape, thin):
-                for n, key in enumerate(self.fit_params_res):
-                    try:
-                        fitting_info[0][1].params[key].value = chain[key][i]
-                    except KeyError:
-                        pass
-                spec_fit_res = self.fit_function(fitting_info[0][1].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
-                self.spec_fitplot = self.speccanvas.plot(x=np.log10(fitting_info[1]), y=np.log10(spec_fit_res),
-                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
-                                                         symbol=None, symbolBrush=None)
-                self.spec_fitplot.setAlpha(0.01, False)
-                self.speccanvas.addItem(self.spec_fitplot)
-        for n, key in enumerate(self.fit_params_res):
-            self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
-
-    def parallel_fitting(self):
-
-        self.total_tasks = len(self.rois[0])
-
-        self.threadpool.setMaxThreadCount(self.ncpu_spinbox.value())
-        self.fit_threads.clear()
-        self.calc_roi_spec(None)
-        self.update_fitmask()
-        #self.tmp_folder = tempfile.mkdtemp(dir = self.batch_fitting_dir)
-        cur_tmp_folder = self.batch_fitting_dir+'/'+os.path.basename(self.eoimg_fname).replace('.fits', '')
-        if not os.path.exists(cur_tmp_folder):
-            os.mkdir(cur_tmp_folder)
-        self.tmp_folder = cur_tmp_folder
-        self.tmp_save_folder = self.tmp_folder
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setMaximum(self.total_tasks)
-        self.timer.start()
-
-        for croi_idx, croi in enumerate(self.rois[0]):
-            fit_task = gstools.FitTask(self, croi_idx)
-            #fit_task.signals.completed.connect(self.task_completed)
-            #fit_task.completed.connect(self.task_completed)
-            #fit_task.signals.connect(self.task_completed)
-            self.threadpool.start(fit_task)
-        self.threadpool.waitForDone()
-        self.check_tasks_completion()
-
-        #import shutil
-        #shutil.rmtree(self.tmp_folder)
-
-
-
-    def check_tasks_completion(self):
-        search_pattern = os.path.join(self.tmp_folder, '*.fits')
-        fit_res_files = glob.glob(search_pattern)
-        #if self.completed_tasks == self.total_tasks:
-        if len(fit_res_files) == self.total_tasks:
-            self.timer.stop()
-            print("{} tasks are finished. ".format(self.total_tasks))
-            final_save = os.path.join(self.batch_fitting_dir,
-                                      os.path.basename(self.eoimg_fname).replace('.fits', '_fit_res.fits'))
-            #self.combine_hdf5_files(final_path=final_save, original_files=hdf5_files)
-            self.combine_fits_files(final_path=final_save, original_files=fit_res_files)
-
-    @pyqtSlot()
-    def task_completed(self):
-        print('The slot is working')
-        self.completed_tasks += 1
-        # progress = int((self.completed_tasks / self.total_tasks) * 100)
-        # self.progress_bar.setValue(progress)
-        # self.progress_bar.show()
-    def pathBatchFitRes(self):
-        # Open the directory selection dialog
-        options = QFileDialog.Options()
-        options |= QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "", options)
-        if directory:
-            print(f"Selected directory: {directory}")
-        else:
-            print("No directory selected, using home instead.")
-            directory = os.path.expanduser("~")
-        self.batch_fitting_dir = directory
-
-    def closeEvent(self, event):
-        if any(thread.isRunning() for thread in self.fit_threads):
-            print('Fittings are still going on!')
-            pass
-        super().closeEvent(event)
     def export_batch_script(self):
         """
-        Parameters:
-        filename (str):
+        Export current analysis settings to executable Python script.
+
+        Generates a standalone script that can reproduce the current analysis
+        setup for batch processing of similar datasets.
         """
+
         options = QFileDialog.Options()
         filename, _ = QFileDialog.getSaveFileName(self,
                                                   "Save Fit Parameters",
@@ -2871,22 +3577,23 @@ class App(QMainWindow):
         #     else:
         #         dill.dump([self.rois[self.roi_group_idx]], cfile)
         lines = ["import lmfit\n", "from pygsfit.pygsfit import App\n", "import dill\n"
-                 "from utils import gstools\n","fit_params = lmfit.Parameters()\n","from PyQt5.QtWidgets import QApplication\n",
-                 "import sys\n", "app = QApplication(sys.argv)\n","from numpy import *\n",
+                                                                        "from utils import gstools\n",
+                 "fit_params = lmfit.Parameters()\n", "from PyQt5.QtWidgets import QApplication\n",
+                 "import sys\n", "app = QApplication(sys.argv)\n", "from numpy import *\n",
                  "f_obj = App()\n", "f_obj.hide()\n\n"]
         app_attributes_tbw = ['eoimg_fname', 'eoimg_time_seq', 'cur_frame_idx']
-        app_attributes = ['fit_params_nvarys', 'fit_kws','eoimg_fitsdata','tp_cal_factor',
-            'has_eovsamap', 'has_dspec', 'has_stokes','fit_method',
-            'has_bkg', 'has_grid_rois',
-            'data_freq_bound', 'tb_spec_bound', 'flx_spec_bound',
-            'fit_freq_bound', 'roi_freq_bound', 'spec_frac_err',
-            'roi_grid_size',
-             'nroi_current_group', 'current_roi_idx',
-            'number_grid_rois', 'pol_select_idx',
-            'spec_in_tb', 'is_calibrated_tp', 'pixelized_grid_rois'
-        ]
-        fit_function_dict = {'powerlaw':'gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc',
-                             'thermal f-f + gyrores':'gstools.GSCostFunctions.Ff_Gyroresonance_MinimizerOneSrc'}
+        app_attributes = ['fit_params_nvarys', 'fit_kws', 'eoimg_fitsdata', 'tp_cal_factor',
+                          'has_eovsamap', 'has_dspec', 'has_stokes', 'fit_method',
+                          'has_bkg', 'has_grid_rois',
+                          'data_freq_bound', 'tb_spec_bound', 'flx_spec_bound',
+                          'fit_freq_bound', 'roi_freq_bound', 'spec_frac_err',
+                          'roi_grid_size',
+                          'nroi_current_group', 'current_roi_idx',
+                          'number_grid_rois', 'pol_select_idx',
+                          'spec_in_tb', 'is_calibrated_tp', 'pixelized_grid_rois'
+                          ]
+        fit_function_dict = {'powerlaw': 'gstools.GSCostFunctions.SinglePowerLawMinimizerOneSrc',
+                             'thermal f-f + gyrores': 'gstools.GSCostFunctions.Ff_Gyroresonance_MinimizerOneSrc'}
         for name, param in self.fit_params.items():
             line = f"fit_params.add('{name}', value={param.value}, vary={param.vary}, min={param.min}, max={param.max})"
             if param.expr is not None:
@@ -2897,14 +3604,14 @@ class App(QMainWindow):
         for attr in app_attributes_tbw:
             value = getattr(self, attr)
             lines.append(f'f_obj.{attr} = {value!r}\n')
-        #file selection has to be done before setting the attrs
+        # file selection has to be done before setting the attrs
         lines.append("f_obj.eoimg_files_seq_select_return()\n")
         for attr in app_attributes:
             value = getattr(self, attr)
             lines.append(f'f_obj.{attr} = {value!r}\n')
         lines.append("f_obj.fit_params = fit_params\n")
         lines.append(f"f_obj.fit_function = {fit_function_dict[self.ele_dist]} \n")
-        #--------add lines to read rois save file
+        # --------add lines to read rois save file
         if self.has_grid_rois:
             cur_roi_list = self.grid_rois
         else:
@@ -2921,7 +3628,7 @@ class App(QMainWindow):
         lines.append("if not hasattr(f_obj, 'batch_fitting_dir'):\n")
         lines.append("    f_obj.pathBatchFitRes()\n")
         lines.append("f_obj.pathBatchFitRes()\n")
-#        lines.append("f_obj.rois_to_fits()\n")
+        #        lines.append("f_obj.rois_to_fits()\n")
         lines.append("f_obj.savedata = True\n")
         lines.append("f_obj.completed_tasks = 0\n")
         lines.append("f_obj.parallel_fitting()\n")
@@ -2930,7 +3637,20 @@ class App(QMainWindow):
 
         print(f"Fit parameters exported to {filename}")
 
-    def serialize_roi(self,roi):
+    def export_cp_batch_script(self):
+        """Build a CP-style batch script from current state."""
+        export_cp_batch_script_from_app(self)
+
+    def serialize_roi(self, roi):
+        """
+        Convert ROI object to string representation.
+
+        Args:
+            roi: PyQtGraph ROI object
+
+        Returns:
+            str: Serialized ROI data for storage/transmission
+        """
         if isinstance(roi, pg.RectROI):
             position = roi.pos()  # This returns a Point-like object for position
             size = roi.size()  # This returns a Point-like object where x and y represent width and height
@@ -2945,7 +3665,16 @@ class App(QMainWindow):
         else:
             raise ValueError("Unsupported ROI type")
 
-    def deserialize_roi(self,roi_string):
+    def deserialize_roi(self, roi_string):
+        """
+        Reconstruct ROI object from string representation.
+
+        Args:
+            roi_string: Serialized ROI data
+
+        Returns:
+            ROI object: Reconstructed PyQtGraph ROI
+        """
         parts = roi_string.split(',')
         roi_type = parts[0]
 
@@ -2962,54 +3691,21 @@ class App(QMainWindow):
             return pg.PolyLineROI(points)  # Adjust to match the constructor of your PolyLineROI class
         else:
             raise ValueError("Unsupported ROI type")
+
     # def set_roi_index(self, roi_idx):
     #     self.current_roi_idx = roi_idx
-    def rois_to_fits(self):
-        arcsec_per_pixel = (self.meta['refmap'].meta['CDELT1'], self.meta['refmap'].meta['CDELT2'])
-        roi_map = np.zeros(self.pg_img_canvas.getImageItem().image.shape, dtype=np.int64)
-        #for index, roi in tqdm(enumerate(self.rois[0])):
-        if hasattr(self, 'pixelized_grid_rois') and self.pixelized_grid_rois is not None:
-            if len(self.pixelized_grid_rois) != len(self.rois[0]):
-                raise ValueError('pixelized_grid_rois and the rois[0] are not isogenous! Please contact Authors.')
-            for index, roi in tqdm(enumerate(self.pixelized_grid_rois), total=len(self.pixelized_grid_rois), desc="Processing ROIs"):
-                #print(roi)
-                roi_map[roi[0][0]:roi[0][0] + roi[1], roi[0][1]:roi[0][1] + roi[1]] = int(index + 1)
-        else:
-            for index, roi in tqdm(enumerate(self.rois[0]), total=len(self.rois[0]), desc="Processing ROIs"):
-                # Convert ROI position to pixels and calculate size in pixels
-                roi_pos_pixels = roiutils.convert_roi_pos_to_pixels(roi, self.meta['refmap'])
-                roi_size_pixels = roiutils.calculate_roi_size_in_pixels(roi, arcsec_per_pixel)
-
-
-
-                if isinstance(roi, pg.RectROI):
-                    roi_map[roi_pos_pixels[0]:roi_pos_pixels[0]+roi_size_pixels[0], roi_pos_pixels[1]:roi_pos_pixels[1]+roi_size_pixels[1]] = int(index+1)
-                elif isinstance(roi, pg.EllipseROI):
-                    for i in range(roi_pos_pixels[0],roi_pos_pixels[0]+roi_size_pixels[0]):
-                        for j in range(roi_pos_pixels[1],roi_pos_pixels[1]+roi_size_pixels[1]):
-                        # Ellipse equation for the mask
-                            if ((j - roi_pos_pixels[0]) ** 2 / roi_size_pixels[0] ** 2 + (i - roi_pos_pixels[1]) ** 2 /
-                            roi_size_pixels[1] ** 2) <= 1:
-                                if roi_map[i, j] == 0:  # Check for no overlap
-                                    roi_map[i, j] = index + 1
-                else:
-                    raise ValueError('Polygon not yet implemented')
-
-        # Save the map as a FITS file
-        filename  = os.path.join(self.batch_fitting_dir, 'roi_map0-{}.fits'.format(len(self.rois[0])-1))
-        if os.path.exists(filename):
-            raise ValueError('rois map exists!')
-        with fits.open(self.eoimg_fname) as hdul:
-            # Extract the header from the primary HDU
-            header = hdul[0].header
-        hdu = fits.PrimaryHDU(data=roi_map, header=header)
-        hdul = fits.HDUList([hdu])
-        hdul.writeto(filename, overwrite=True)
-        #fits.writeto(filename, roi_map,header=self.meta, overwrite=True)
-
-
 
     def combine_hdf5_files(self, final_path, original_files):
+        """
+        Combine multiple HDF5 fitting result files into a single file.
+
+        Args:
+            final_path (str): Output path for combined file
+            original_files (list): List of HDF5 file paths to combine
+
+        Creates a single HDF5 file with each original file as a separate group,
+        including an index dataset for file tracking.
+        """
         with h5py.File(final_path, 'w') as hf_combined:
             index_dataset = []
 
@@ -3030,6 +3726,16 @@ class App(QMainWindow):
             hf_combined.create_dataset('file_indices', data=index_dataset)
 
     def combine_fits_files(self, final_path, original_files):
+        """
+        Combine multiple FITS fitting result files into a single multi-extension FITS file.
+
+        Args:
+            final_path (str): Output path for combined FITS file
+            original_files (list): List of FITS file paths to combine
+
+        Merges all HDUs from individual files into one FITS file with renamed
+        extensions to avoid conflicts.
+        """
         original_files.sort()
         with fits.HDUList() as hdul_combined:
             for file in original_files:
@@ -3047,44 +3753,121 @@ class App(QMainWindow):
             # Write the combined HDU list to a new file
             hdul_combined.writeto(final_path, overwrite=True)
 
+    def rois_to_fits(self):
+        """
+        Convert ROI regions to FITS image format.
+
+        Creates a pixel map where each ROI is assigned a unique integer
+        value for batch processing identification.
+        """
+        arcsec_per_pixel = (self.meta['refmap'].meta['CDELT1'], self.meta['refmap'].meta['CDELT2'])
+        roi_map = np.zeros(self.pg_img_canvas.getImageItem().image.shape, dtype=np.int64)
+        # for index, roi in tqdm(enumerate(self.rois[0])):
+        if hasattr(self, 'pixelized_grid_rois') and self.pixelized_grid_rois is not None:
+            if len(self.pixelized_grid_rois) != len(self.rois[0]):
+                raise ValueError('pixelized_grid_rois and the rois[0] are not isogenous! Please contact Authors.')
+            for index, roi in tqdm(enumerate(self.pixelized_grid_rois), total=len(self.pixelized_grid_rois),
+                                   desc="Processing ROIs"):
+                # print(roi)
+                roi_map[roi[0][0]:roi[0][0] + roi[1], roi[0][1]:roi[0][1] + roi[1]] = int(index + 1)
+        else:
+            for index, roi in tqdm(enumerate(self.rois[0]), total=len(self.rois[0]), desc="Processing ROIs"):
+                # Convert ROI position to pixels and calculate size in pixels
+                roi_pos_pixels = roiutils.convert_roi_pos_to_pixels(roi, self.meta['refmap'])
+                roi_size_pixels = roiutils.calculate_roi_size_in_pixels(roi, arcsec_per_pixel)
+
+                if isinstance(roi, pg.RectROI):
+                    roi_map[roi_pos_pixels[0]:roi_pos_pixels[0] + roi_size_pixels[0],
+                    roi_pos_pixels[1]:roi_pos_pixels[1] + roi_size_pixels[1]] = int(index + 1)
+                elif isinstance(roi, pg.EllipseROI):
+                    for i in range(roi_pos_pixels[0], roi_pos_pixels[0] + roi_size_pixels[0]):
+                        for j in range(roi_pos_pixels[1], roi_pos_pixels[1] + roi_size_pixels[1]):
+                            # Ellipse equation for the mask
+                            if ((j - roi_pos_pixels[0]) ** 2 / roi_size_pixels[0] ** 2 + (i - roi_pos_pixels[1]) ** 2 /
+                                roi_size_pixels[1] ** 2) <= 1:
+                                if roi_map[i, j] == 0:  # Check for no overlap
+                                    roi_map[i, j] = index + 1
+                else:
+                    raise ValueError('Polygon not yet implemented')
+
+        # Save the map as a FITS file
+        filename = os.path.join(self.batch_fitting_dir, 'roi_map0-{}.fits'.format(len(self.rois[0]) - 1))
+        if os.path.exists(filename):
+            raise ValueError('rois map exists!')
+        with fits.open(self.eoimg_fname) as hdul:
+            # Extract the header from the primary HDU
+            header = hdul[0].header
+        hdu = fits.PrimaryHDU(data=roi_map, header=header)
+        hdul = fits.HDUList([hdu])
+        hdul.writeto(filename, overwrite=True)
+        # fits.writeto(filename, roi_map,header=self.meta, overwrite=True)
+
+    # ==================================================================
+    # ========== FLEISHMAN CODE INTEGRATION ==========
+    # ==================================================================
+
     def fit_Spectrum_Kl_input_converter(self):
-        #convert the parameters read from the app to the input of fitting func in the fit_Spectrum_Kl code
+        """
+        Convert application parameters to Fleishman code input format.
+
+        Transforms GUI parameter values and spectral data into the specific
+        array formats required by Dr. Fleishman's fitting routines.
+
+        convert the parameters read from the app to the input of fitting func in the fit_Spectrum_Kl code
+        """
+        # convert the parameters read from the app to the input of fitting func in the fit_Spectrum_Kl code
         # Long_input:
         fitted_freq = self.rois[self.roi_group_idx][self.current_roi_idx].freqghz_tofit.compressed()
-        ninput = np.array([7, 0, 1, len(fitted_freq), 1, 1], dtype='int32') # at this moment, all the 7 parms are opened.
+        ninput = np.array([7, 0, 1, len(fitted_freq), 1, 1],
+                          dtype='int32')  # at this moment, all the 7 parms are opened.
         # freq
         freq = fitted_freq.astype(np.float64)
-        #spec_in
+        # spec_in
         spec_in = np.zeros((1, len(freq), 4), dtype='float64', order='F')
         spec_in[0, :, 0] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_tofit.compressed()
         spec_in[0, :, 2] = self.rois[self.roi_group_idx][self.current_roi_idx].spec_err_tofit.compressed()
-        #Real_input
-        rinput = np.array([0.17, 1e-6, 1.0, #SIMPLEX Step, SIMPLEX accuracy, Flux threshold to be fitted [sfu*GHz]
+        # Real_input
+        rinput = np.array([0.17, 1e-6, 1.0,  # SIMPLEX Step, SIMPLEX accuracy, Flux threshold to be fitted [sfu*GHz]
                            self.rois[self.roi_group_idx][self.current_roi_idx].total_area,
                            self.fit_params['depth_asec'].value,
-                           self.fit_params['Emin_keV'].value/1.e3], dtype='float64')
+                           self.fit_params['Emin_keV'].value / 1.e3], dtype='float64')
         parguess = np.zeros((15, 3), dtype='float64', order='F')
         for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
             cur_arr = gstools.array_lmfit_convert_param(self.fit_params, ckeyword)
-            if ckeyword=='log_nnth': # 1d7 cm^-3
-                cur_arr = 10**cur_arr/1.e7
-            if ckeyword=='log_nth': #1d9 cm^-3
-                cur_arr = 10**cur_arr/1.e9
-            parguess[parm_idx,:] = cur_arr.astype(np.float64)
-            parguess[7:,:] = np.tile(np.array([5.0, 0.2, 20.0], dtype='float64'), (8, 1)) # not used
-        self.fit_Spectrum_Kl_input=(ninput, rinput, parguess, freq, spec_in)
+            if ckeyword == 'log_nnth':  # 1d7 cm^-3
+                cur_arr = 10 ** cur_arr / 1.e7
+            if ckeyword == 'log_nth':  # 1d9 cm^-3
+                cur_arr = 10 ** cur_arr / 1.e9
+            parguess[parm_idx, :] = cur_arr.astype(np.float64)
+            parguess[7:, :] = np.tile(np.array([5.0, 0.2, 20.0], dtype='float64'), (8, 1))  # not used
+        self.fit_Spectrum_Kl_input = (ninput, rinput, parguess, freq, spec_in)
 
     def fit_Spectrum_Kl_output_converter(self):
-        #convert the output of fit_Spectrum_Kl code res then import to the app
+        """
+        Convert Fleishman code output back to application format.
+
+        Transforms fitting results from Fleishman code arrays back into
+        lmfit Parameters format for GUI display and further processing.
+
+                #convert the output of fit_Spectrum_Kl code res then import to the app
+        """
         if not hasattr(self, 'fit_Spectrum_Kl_output'):
             raise ValueError('fit_Spectrum_Kl is not performed yet!')
         self.fit_params_res = copy.deepcopy(self.fit_params)
         for parm_idx, ckeyword in enumerate(['log_nnth', 'Bx100G', 'theta', 'log_nth', 'delta', 'Emax_MeV', 'T_MK']):
-            gstools.array_lmfit_convert_param(self.fit_params_res, ckeyword, par_value=self.fit_Spectrum_Kl_output[1][0][parm_idx], to_array=False)
-
+            gstools.array_lmfit_convert_param(self.fit_params_res, ckeyword,
+                                              par_value=self.fit_Spectrum_Kl_output[1][0][parm_idx], to_array=False)
 
     def fit_Spectrum_Kl_call_preset(self):
-        # The calling of fit_Spectrum_Kl code follow its own convention, prepare the GUI display and the parameters for it.
+        """
+        Configure GUI settings for Fleishman code compatibility.
+
+        Sets up appropriate parameter selections, units, and fitting modes
+        required for proper operation with Dr. Fleishman's fitting routines.
+
+                # The calling of fit_Spectrum_Kl code follow its own convention, prepare the GUI display and the parameters for it.
+
+        """
 
         # e- dist will be changed to 'pwl'
         self.ele_function_selector_widget
@@ -3102,19 +3885,151 @@ class App(QMainWindow):
         self.plot_flx_button.setChecked(True)
         self.tb_flx_btnstate()
 
+    # ========== UTILITY AND HELPER FUNCTIONS ==========
+
+    def pathBatchFitRes(self):
+        """
+        Open directory selection dialog for batch fitting results.
+
+        Allows user to select output directory for batch processing results,
+        with fallback to home directory if none selected.
+        """
+        # Open the directory selection dialog
+        options = QFileDialog.Options()
+        options |= QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "", options)
+        if directory:
+            print(f"Selected directory: {directory}")
+        else:
+            print("No directory selected, using home instead.")
+            directory = os.path.expanduser("~")
+        self.batch_fitting_dir = directory
+
+    def closeEvent(self, event):
+        """
+        Handle application close event.
+
+        Args:
+            event: Close event object
+
+        Checks for running fitting threads before allowing application closure.
+        """
+        if any(thread.isRunning() for thread in self.fit_threads):
+            print('Fittings are still going on!')
+            pass
+        super().closeEvent(event)
+
+    def update_gui_after_fitting(self):
+        """
+        Update GUI displays after parallel fitting completion.
+
+        Currently not used - placeholder for updating GUI elements
+        after batch fitting operations complete.
+        """
+        #  this function is currently not in used
+        ##todo: update GUI after spectral fitting to make paralell mode work in the regular GUI mode
+        # pass
+        fitting_info = self.exported_fittig_info
+        if hasattr(self, 'spec_fitplot'):
+            self.speccanvas.removeItem(self.spec_fitplot)
+        # --------
+        if fitting_info[2] != 'mcmc':
+            self.fit_params_res = fitting_info[0].params
+            spec_fit_res = self.fit_function(fitting_info[0].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
+            self.spec_fitplot = self.speccanvas.plot(x=fitting_info[1], y=np.log10(spec_fit_res),
+                                                     pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                     symbol=None, symbolBrush=None)
+            self.speccanvas.addItem(self.spec_fitplot)
+        else:
+            self.fit_params_res = fitting_info[0][0].params
+            chain = fitting_info[0][0].flatchain
+            shape = chain.shape[0]
+            # ----------
+            burn = self.fit_kws['burn']
+            thin = self.fit_kws['thin']
+            steps = self.fit_kws['steps']
+            for n, key in enumerate(self.fit_params_res):
+                try:
+                    self.param_fit_value_widgets[n].setValue(np.median(chain[key][burn:]))
+                except KeyError:
+                    pass
+            # freqghz_toplot = np.logspace(0, np.log10(20.), 100)
+
+            for i in range(burn, shape, thin):
+                for n, key in enumerate(self.fit_params_res):
+                    try:
+                        fitting_info[0][1].params[key].value = chain[key][i]
+                    except KeyError:
+                        pass
+                spec_fit_res = self.fit_function(fitting_info[0][1].params, fitting_info[1], spec_in_tb=self.spec_in_tb)
+                self.spec_fitplot = self.speccanvas.plot(x=np.log10(fitting_info[1]), y=np.log10(spec_fit_res),
+                                                         pen=dict(color=pg.mkColor(self.current_roi_idx), width=4),
+                                                         symbol=None, symbolBrush=None)
+                self.spec_fitplot.setAlpha(0.01, False)
+                self.speccanvas.addItem(self.spec_fitplot)
+        for n, key in enumerate(self.fit_params_res):
+            self.param_fit_value_widgets[n].setValue(self.fit_params_res[key].value)
+
+    def group_of_rois_to_binary_map(self):
+        """
+        Convert ROI group to binary map representation.
+
+        Placeholder function for future batch processing functionality.
+        """
+
+        # convert a group of ROIs to a map filled with task index
+        ##todo convert to binary map for batch mode
+        pass
+
+    def exec_customized_rois_window(self):
+        """
+        Execute dialog for manual ROI definition.
+
+        Opens custom dialog allowing users to define ROIs through
+        text input or other manual specification methods.
+        """
+        try:
+            self.customized_rois_Form = QDialog()
+            ui = roiutils.roi_dialog(img_size=[self.meta['nx'], self.meta['ny']], cfreqs=self.cfreqs)
+            ui.setupUi(self.customized_rois_Form)
+            self.customized_rois_Form.show()
+            cur_result = self.customized_rois_Form.exec()
+            crtf_list = ui.getResult(self.customized_rois_Form)
+            return (crtf_list, cur_result)
+        except:
+            msg_box = QMessageBox(QMessageBox.Warning, 'No EOVSA Image Loaded', 'Load EOVSA Image first!')
+            msg_box.exec_()
+
+    def add_manually_defined_rois(self):
+        """
+        Add ROIs from manual definition dialog.
+
+        Processes user-defined ROI specifications and adds them
+        to the current ROI group.
+        """
+        dialog_output = self.exec_customized_rois_window()
+        if not dialog_output[1] or len(dialog_output[0]) == 0:
+            print('No ROI is added!')
+        else:
+            roiutils.add_md_rois(self, inp_str_list=dialog_output[0])
+
+
 class fileSeqDialog(QWidget):
     dialog_completed = pyqtSignal(bool, int, int)
+
     def __init__(self, n_files, parent=None):
         super().__init__(parent)
 
         # Layout
         layout = QVBoxLayout()
         # Add widgets
-        self.label = QLabel("{} files are detected in this sequence, do you want to make a image seq?\nDefine the range here:".format(n_files))
+        self.label = QLabel(
+            "{} files are detected in this sequence, do you want to make a image seq?\nDefine the range here:".format(
+                n_files))
         self.input1 = QLineEdit(self)
         self.input1.setText(str(0))
         self.input2 = QLineEdit(self)
-        self.input2.setText(str(n_files-1))
+        self.input2.setText(str(n_files - 1))
 
         self.yesButton = QPushButton("Yes", self)
         self.noButton = QPushButton("No", self)
@@ -3141,12 +4056,17 @@ class fileSeqDialog(QWidget):
 
         self.dialog_completed.emit(True, int(value1), int(value2))
         self.close()
+
     def on_no(self):
         self.dialog_completed.emit(False, 0, 0)
         self.close()
 
-
-if __name__ == '__main__':
+def main():
     app = QApplication(sys.argv)
     ex = App()
     sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
+
